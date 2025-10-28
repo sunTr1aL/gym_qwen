@@ -1,0 +1,10 @@
+torch>=2.8
+gymnasium>=1.2.1
+mujoco>=3.3
+minari>=0.4.3
+# d4rl is deprecated; datasets moved to Minari. Keep optional install only if you need legacy APIs.
+# d4rl>=1.1
+wandb>=0.17.0
+numpy>=1.26
+tqdm>=4.66
+pillow
