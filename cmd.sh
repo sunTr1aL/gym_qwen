@@ -3,7 +3,7 @@
 torchrun --nproc_per_node=8 \
   scripts/train_pipeline_ddp.py \
   --model qwen3 \
-  --env halfcheetah \
+  --env humanoid \
   --dataset medium \
   --pipeline_stages 4 \
   --data_parallel_groups 2 \
