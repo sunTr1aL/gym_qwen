@@ -248,6 +248,7 @@ def train(args):
     device = torch.device(f"cuda:{device_idx}")
     _dbg(rank, f"setting device {device}")
     torch.cuda.set_device(device)
+    dist.barrier()
     _set_seed(args.seed + rank if args.seed is not None else None)
     _dbg(rank, f"device set to {device}")
 
@@ -282,6 +283,7 @@ def train(args):
     else:
         state_dim = 0
         act_dim = 0
+    dist.barrier()
 
     group_stage0_global = pipeline_group_ranks[dp_rank][0]
     group_stage_last_global = pipeline_group_ranks[dp_rank][-1]
@@ -325,6 +327,7 @@ def train(args):
         data_loader = None
         data_iter = None
         state_mean, state_std = np.zeros((state_dim,), dtype=np.float32), np.ones((state_dim,), dtype=np.float32)
+    dist.barrier()
 
     rtg_tensor = torch.tensor([rtg_target if rtg_target is not None else 0.0], dtype=torch.float32, device=device)
     rtg_tensor = _broadcast_tensor(rtg_tensor, src_global_rank=group_stage0_global, group=pipeline_group)
@@ -345,6 +348,7 @@ def train(args):
 
     _dbg(rank, "tracing pipeline with torch.distributed.pipelining")
     traced_pipe = make_pipeline(blueprint_module, example_inputs)
+    dist.barrier()
     pipe_info = traced_pipe.info()
     stage_module = traced_pipe.get_stage_module(pp_rank)
 
