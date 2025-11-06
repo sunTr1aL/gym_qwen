@@ -4,9 +4,8 @@ set -euo pipefail
 
 export NCCL_P2P_DISABLE=0
 export NCCL_SHM_DISABLE=0
-export NCCL_NET_DISABLE=1
+export NCCL_SOCKET_IFNAME=lo
 export NCCL_IB_DISABLE=1
-unset NCCL_SOCKET_IFNAME
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 torchrun --nproc_per_node=8 \
@@ -27,4 +26,5 @@ torchrun --nproc_per_node=8 \
   --lr 1e-4 \
   --warmup_steps 10000 \
   --grad_clip 0.25 \
-  --log_dir dt_runs/qwen3_pp "$@"
+  --log_dir dt_runs/qwen3_pp \
+  --dist_backend gloo "$@"
