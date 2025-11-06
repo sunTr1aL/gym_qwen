@@ -213,6 +213,7 @@ def train(args):
         raise ValueError(
             f"1F1B schedule requires micro_batches >= pipeline_stages. Got {args.micro_batches} vs {args.pipeline_stages}."
         )
+    _dbg(rank, "init_process_group complete")
 
     device_groups = _parse_device_groups(
         args.device_groups, expected_groups=args.data_parallel_groups, expected_stages=args.pipeline_stages
@@ -236,6 +237,7 @@ def train(args):
 
     dp_rank = rank // args.pipeline_stages
     pp_rank = rank % args.pipeline_stages
+    _dbg(rank, f"dp_rank={dp_rank}, pp_rank={pp_rank}")
 
     pipeline_group = dist.new_group(ranks=pipeline_group_ranks[dp_rank])
     stage_dp_group = dist.new_group(ranks=stage_dp_group_ranks[pp_rank])
@@ -249,6 +251,7 @@ def train(args):
     torch.cuda.set_device(device)
 
     _set_seed(args.seed + rank if args.seed is not None else None)
+    _dbg(rank, f"device set to {device}")
 
     # Stage-0 specific setup: dataset + environment metadata
     if args.env == "walker2d":
@@ -272,6 +275,7 @@ def train(args):
 
     env = None
     if pp_rank == 0:
+        _dbg(rank, f"creating env {env_name}")
         env = _create_env(env_name)
         state_dim = env.observation_space.shape[0]
         act_dim = env.action_space.shape[0]
@@ -289,6 +293,7 @@ def train(args):
     dataset_path = os.path.join(args.dataset_dir, f"{env_d4rl_name}.pkl")
 
     if pp_rank == 0:
+        _dbg(rank, "loading dataset")
         dataset = D4RLTrajectoryDataset(
             dataset_path,
             args.context_len,
@@ -326,6 +331,7 @@ def train(args):
     rtg_target = float(rtg_tensor.item())
 
     # Build pipeline blueprint and schedule
+    _dbg(rank, "building pipeline blueprint")
     blueprint_module, model_info, _ = _build_pipeline_blueprint(args, state_dim, act_dim)
     micro_batch_size = args.batch_size // args.micro_batches
 
@@ -337,10 +343,12 @@ def train(args):
         torch.ones((micro_batch_size, args.context_len), dtype=torch.float32),
     )
 
+    _dbg(rank, "tracing pipeline with torch.distributed.pipelining")
     traced_pipe = make_pipeline(blueprint_module, example_inputs)
     pipe_info = traced_pipe.info()
     stage_module = traced_pipe.get_stage_module(pp_rank)
 
+    _dbg(rank, f"constructing pipeline stage {pp_rank}")
     stage = build_stage(
         stage_module=stage_module,
         stage_index=pp_rank,
@@ -367,6 +375,7 @@ def train(args):
             return torch.zeros((), device=action_preds.device, dtype=action_preds.dtype)
         return F.mse_loss(preds_flat, target_flat, reduction="mean")
 
+    _dbg(rank, "creating Schedule1F1B")
     schedule = Schedule1F1B(
         stage=stage,
         n_microbatches=args.micro_batches,
@@ -378,6 +387,7 @@ def train(args):
 
     optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=args.lr, weight_decay=args.wt_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda steps: min((steps + 1) / args.warmup_steps, 1.0))
+    _dbg(rank, "optimizers ready")
 
     log_dir = args.log_dir
     os.makedirs(log_dir, exist_ok=True)
@@ -435,6 +445,7 @@ def train(args):
                 returns_to_go = torch.empty((args.batch_size, args.context_len, 1), dtype=torch.float32, device=device)
                 traj_mask = torch.empty((args.batch_size, args.context_len), dtype=torch.float32, device=device)
 
+            _dbg(rank, "broadcasting batch tensors")
             _broadcast_tensor(timesteps, src_global_rank=group_stage0_global, group=pipeline_group)
             _broadcast_tensor(states, src_global_rank=group_stage0_global, group=pipeline_group)
             _broadcast_tensor(actions, src_global_rank=group_stage0_global, group=pipeline_group)
@@ -445,6 +456,7 @@ def train(args):
 
             optimizer.zero_grad(set_to_none=True)
             losses: List[torch.Tensor] = []
+            _dbg(rank, "running schedule step")
             schedule.step(
                 timesteps,
                 states,
@@ -585,3 +597,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+def _dbg(rank: int, message: str):
+    print(f"[rank {rank}] {message}", flush=True)
