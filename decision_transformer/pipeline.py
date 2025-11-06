@@ -210,16 +210,46 @@ class _QwenStageBase(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.blocks = nn.ModuleList(
-            Qwen3Block(
+            _PipelineQwenBlock(
                 hidden_size=hidden_size,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                context_len=context_len,
+                rope_theta=rope_theta,
                 mlp_ratio=mlp_ratio,
                 attn_dropout=attn_dropout,
-                bias=False,
             )
             for _ in range(num_blocks)
+        )
+
+    def _run_blocks(self, h: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
+        for blk in self.blocks:
+            h = blk(h, attn_mask)
+        return h
+
+
+class _PipelineQwenBlock(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        context_len: int,
+        rope_theta: float,
+        mlp_ratio: float,
+        attn_dropout: float,
+    ) -> None:
+        super().__init__()
+        self.inner = Qwen3Block(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            mlp_ratio=mlp_ratio,
+            attn_dropout=attn_dropout,
+            bias=False,
         )
         self.rope = RotaryEmbedding(
             head_dim=head_dim,
@@ -227,10 +257,8 @@ class _QwenStageBase(nn.Module):
             rope_theta=rope_theta,
         )
 
-    def _run_blocks(self, h: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        for blk in self.blocks:
-            h = blk(h, attn_mask, self.rope)
-        return h
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
+        return self.inner(x, attn_mask, self.rope)
 
 
 class QwenStageInput(_QwenStageBase):

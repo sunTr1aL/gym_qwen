@@ -245,8 +245,8 @@ def train(args):
     stage_devices = device_groups[dp_rank]
     device_idx = stage_devices[pp_rank]
     device = torch.device(f"cuda:{device_idx}")
+    _dbg(rank, f"setting device {device}")
     torch.cuda.set_device(device)
-
     _set_seed(args.seed + rank if args.seed is not None else None)
     _dbg(rank, f"device set to {device}")
 
