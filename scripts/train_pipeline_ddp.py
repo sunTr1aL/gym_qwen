@@ -17,6 +17,9 @@ from torch.distributed.pipelining import Schedule1F1B, build_stage, pipe_split, 
 from torch.distributed.pipelining.microbatch import TensorChunkSpec
 from torch.utils.data import DataLoader, DistributedSampler
 
+def _dbg(rank: int, message: str):
+    print(f"[rank {rank}] {message}", flush=True)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 if ROOT_DIR not in sys.path:
@@ -597,8 +600,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-def _dbg(rank: int, message: str):
-    try:
-        print(f"[rank {rank}] {message}", flush=True)
-    except Exception:
-        pass
