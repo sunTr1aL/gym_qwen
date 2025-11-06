@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.pipelining import Schedule1F1B, build_stage, pipe_split, pipeline as make_pipeline
 from torch.distributed.pipelining.microbatch import TensorChunkSpec
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 def _dbg(rank: int, message: str):
@@ -356,6 +357,17 @@ def train(args):
         group=pipeline_group,
     )
     stage.submod.train()
+    if stage_dp_group_size > 1:
+        # import time
+        # time.sleep(1)
+        stage.submod = DDP(
+            stage.submod,
+            device_ids=[device_idx],
+            process_group=stage_dp_group,
+            broadcast_buffers=False,
+            find_unused_parameters=False,
+        )
+    stage.submod.train()
 
     args_chunk_spec = TensorChunkSpec.from_tuple((0, 0, 0, 0, 0))
     output_merge_spec = (
@@ -466,11 +478,6 @@ def train(args):
                 losses=losses,
             )
 
-            if stage_dp_group_size > 1:
-                for param in stage.submod.parameters():
-                    if param.grad is not None:
-                        dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, group=stage_dp_group)
-
             if args.grad_clip is not None and args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(stage.submod.parameters(), args.grad_clip)
             optimizer.step()
@@ -504,8 +511,9 @@ def train(args):
             csv_writer.writerow([time_elapsed, total_updates, mean_loss])
 
     # Save final weights (gather stage states to pipeline group root then global rank 0 saves)
+    state_dict = stage.submod.module.state_dict() if isinstance(stage.submod, DDP) else stage.submod.state_dict()
     stage_states = _gather_stage_states(
-        stage.submod.state_dict(),
+        state_dict,
         pipeline_group=pipeline_group,
         stage_idx=pp_rank,
         is_group_root=(pipeline_group_rank == 0),
