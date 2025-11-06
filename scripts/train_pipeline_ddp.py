@@ -180,8 +180,8 @@ def _build_pipeline_blueprint(
     return SequentialPipelineModule(stages), info, metadata
 
 
-def _broadcast_tensor(tensor: torch.Tensor, src_rank: int, group: dist.ProcessGroup) -> torch.Tensor:
-    dist.broadcast(tensor, src=src_rank, group=group)
+def _broadcast_tensor(tensor: torch.Tensor, src_global_rank: int, group: dist.ProcessGroup) -> torch.Tensor:
+    dist.broadcast(tensor, src=src_global_rank, group=group)
     return tensor
 
 
@@ -279,8 +279,11 @@ def train(args):
         state_dim = 0
         act_dim = 0
 
+    group_stage0_global = pipeline_group_ranks[dp_rank][0]
+    group_stage_last_global = pipeline_group_ranks[dp_rank][-1]
+
     dims_tensor = torch.tensor([state_dim, act_dim], dtype=torch.int64, device=device)
-    dims_tensor = _broadcast_tensor(dims_tensor, src_rank=0, group=pipeline_group)
+    dims_tensor = _broadcast_tensor(dims_tensor, src_global_rank=group_stage0_global, group=pipeline_group)
     state_dim, act_dim = int(dims_tensor[0].item()), int(dims_tensor[1].item())
 
     dataset_path = os.path.join(args.dataset_dir, f"{env_d4rl_name}.pkl")
@@ -319,7 +322,7 @@ def train(args):
         state_mean, state_std = np.zeros((state_dim,), dtype=np.float32), np.ones((state_dim,), dtype=np.float32)
 
     rtg_tensor = torch.tensor([rtg_target if rtg_target is not None else 0.0], dtype=torch.float32, device=device)
-    rtg_tensor = _broadcast_tensor(rtg_tensor, src_rank=0, group=pipeline_group)
+    rtg_tensor = _broadcast_tensor(rtg_tensor, src_global_rank=group_stage0_global, group=pipeline_group)
     rtg_target = float(rtg_tensor.item())
 
     # Build pipeline blueprint and schedule
@@ -432,11 +435,11 @@ def train(args):
                 returns_to_go = torch.empty((args.batch_size, args.context_len, 1), dtype=torch.float32, device=device)
                 traj_mask = torch.empty((args.batch_size, args.context_len), dtype=torch.float32, device=device)
 
-            _broadcast_tensor(timesteps, src_rank=0, group=pipeline_group)
-            _broadcast_tensor(states, src_rank=0, group=pipeline_group)
-            _broadcast_tensor(actions, src_rank=0, group=pipeline_group)
-            _broadcast_tensor(returns_to_go, src_rank=0, group=pipeline_group)
-            _broadcast_tensor(traj_mask, src_rank=0, group=pipeline_group)
+            _broadcast_tensor(timesteps, src_global_rank=group_stage0_global, group=pipeline_group)
+            _broadcast_tensor(states, src_global_rank=group_stage0_global, group=pipeline_group)
+            _broadcast_tensor(actions, src_global_rank=group_stage0_global, group=pipeline_group)
+            _broadcast_tensor(returns_to_go, src_global_rank=group_stage0_global, group=pipeline_group)
+            _broadcast_tensor(traj_mask, src_global_rank=group_stage0_global, group=pipeline_group)
 
             action_target = actions.clone()
 
@@ -469,7 +472,7 @@ def train(args):
                     loss_tensor = stacked.mean()
                 else:
                     loss_tensor = torch.zeros(1, device=device)
-            _broadcast_tensor(loss_tensor, src_rank=args.pipeline_stages - 1, group=pipeline_group)
+            _broadcast_tensor(loss_tensor, src_global_rank=group_stage_last_global, group=pipeline_group)
 
             if pp_rank == 0:
                 aggregate = loss_tensor.clone()
