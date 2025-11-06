@@ -7,7 +7,7 @@ import math
 from datetime import datetime
 
 import numpy as np
-import gym
+import gymnasium as gym
 
 import torch
 import torch.nn.functional as F
@@ -25,17 +25,11 @@ from decision_transformer.model import DecisionTransformer, DecisionTransformerQ
 def _create_env(env_name):
     try:
         return gym.make(env_name)
-    except Exception as gym_err:
-        try:
-            import gymnasium as gymnasium
-        except ImportError:
-            raise gym_err
-        try:
-            return gymnasium.make(env_name)
-        except Exception as gymnasium_err:
-            raise RuntimeError(
-                f"Failed to construct environment '{env_name}' with gym ({gym_err}) and gymnasium ({gymnasium_err})."
-            )
+    except Exception as gymnasium_err:
+        raise RuntimeError(
+            f"Failed to construct environment '{env_name}' with gymnasium ({gymnasium_err}). "
+            "Ensure required environment packages (e.g., mujoco, gymnasium-robotics) are installed."
+        )
 
 
 def _resolve_qwen_dims(args):

@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 import math
-import gym
+import gymnasium as gym
 import torch
 import numpy as np
 
@@ -95,25 +95,15 @@ def _create_env(env_name, render=False):
     try:
         return gym.make(env_name, **render_kwargs)
     except TypeError:
-        # Older Gym versions may not accept render_mode.
+        # Some Gymnasium envs might not support render_mode.
         if render_kwargs:
             return gym.make(env_name)
         raise
-    except Exception as gym_err:
-        try:
-            import gymnasium as gymnasium
-        except ImportError:
-            raise gym_err
-        try:
-            return gymnasium.make(env_name, **render_kwargs)
-        except TypeError:
-            if render_kwargs:
-                return gymnasium.make(env_name)
-            raise
-        except Exception as gymnasium_err:
-            raise RuntimeError(
-                f"Failed to construct environment '{env_name}' with gym ({gym_err}) and gymnasium ({gymnasium_err})."
-            )
+    except Exception as gymnasium_err:
+        raise RuntimeError(
+            f"Failed to construct environment '{env_name}' with gymnasium ({gymnasium_err}). "
+            "Ensure all required plugins (e.g., mujoco, gymnasium-robotics) are installed."
+        )
 
 def test(args):
 

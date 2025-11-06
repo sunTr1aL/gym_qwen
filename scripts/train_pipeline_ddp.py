@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import gym
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -32,17 +32,11 @@ from decision_transformer.utils import D4RLTrajectoryDataset
 def _create_env(env_name: str):
     try:
         return gym.make(env_name)
-    except Exception as gym_err:
-        try:
-            import gymnasium as gymnasium
-        except ImportError:
-            raise gym_err
-        try:
-            return gymnasium.make(env_name)
-        except Exception as gymnasium_err:
-            raise RuntimeError(
-                f"Failed to construct environment '{env_name}' with gym ({gym_err}) and gymnasium ({gymnasium_err})."
-            )
+    except Exception as gymnasium_err:
+        raise RuntimeError(
+            f"Failed to construct environment '{env_name}' with gymnasium ({gymnasium_err}). "
+            "Install the required environment packages such as 'mujoco' or 'gymnasium-robotics'."
+        )
 
 
 def _resolve_qwen_dims(args) -> Tuple[int, int, int, int]:
