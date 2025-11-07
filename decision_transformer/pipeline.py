@@ -259,7 +259,7 @@ class _PipelineQwenBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        return self.inner(x, attn_mask)
+        return self.inner(x, attn_mask, self.rope)
 
 
 class QwenStageInput(_QwenStageBase):

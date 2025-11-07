@@ -224,7 +224,16 @@ def repeat_kv(x, n_rep):
     return x
 
 class Qwen3Attention(nn.Module):
-    def __init__(self, hidden_size, num_heads, num_kv_heads, head_dim, attn_dropout=0.0, bias=False):
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        attn_dropout=0.0,
+        bias=False,
+        rope=None,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -239,8 +248,12 @@ class Qwen3Attention(nn.Module):
         self.q_norm = RMSNorm(head_dim)
         self.k_norm = RMSNorm(head_dim)
         self.attn_drop = nn.Dropout(attn_dropout)
+        self.rope = rope
 
-    def forward(self, x, attn_mask, rope):
+    def forward(self, x, attn_mask, rope=None):
+        rope_ref = rope if rope is not None else self.rope
+        if rope_ref is None:
+            raise ValueError("Qwen3Attention requires a RotaryEmbedding instance.")
         # x: [B, T, C]
         b, t, _ = x.shape
         q = self.q_proj(x).view(b, t, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, T, D]
@@ -252,7 +265,7 @@ class Qwen3Attention(nn.Module):
         k = self.k_norm(k)
 
         # RoPE
-        cos, sin = rope(t, device=x.device, dtype=x.dtype)
+        cos, sin = rope_ref(t, device=x.device, dtype=x.dtype)
         q, k = apply_rope(q, k, cos, sin)
 
         # GQA expand kv
@@ -295,18 +308,15 @@ class Qwen3Block(nn.Module):
         super().__init__()
         intermediate = int(mlp_ratio * hidden_size)
         self.input_norm = RMSNorm(hidden_size)
-        self.attn = Qwen3Attention(hidden_size, num_heads, num_kv_heads, head_dim, attn_dropout, bias)
+        self.attn = Qwen3Attention(hidden_size, num_heads, num_kv_heads, head_dim, attn_dropout, bias, rope=rope)
         self.post_attn_norm = RMSNorm(hidden_size)
         self.mlp = Qwen3MLP(hidden_size, intermediate)
         self.rope = rope
 
     def forward(self, x, attn_mask, rope=None):
-        rope_ref = rope if rope is not None else self.rope
-        if rope_ref is None:
-            raise ValueError("Qwen3Block requires a RotaryEmbedding instance.")
         residual = x
         x = self.input_norm(x)
-        x = self.attn(x, attn_mask, rope_ref)
+        x = self.attn(x, attn_mask, rope)
         x = residual + x
         residual = x
         x = self.post_attn_norm(x)
