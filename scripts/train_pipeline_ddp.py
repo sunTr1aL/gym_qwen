@@ -389,14 +389,14 @@ def train(args):
         TensorChunkSpec(0),
         TensorChunkSpec(0),
         TensorChunkSpec(0),
-        TensorChunkSpec(0),
     )
 
     def action_loss_fn(outputs, target):
-        _, action_preds, _, traj_mask = outputs
+        _, action_preds, _ = outputs
+        action_target, traj_mask = target
         valid = traj_mask.reshape(-1) > 0.0
         preds_flat = action_preds.reshape(-1, act_dim)[valid]
-        target_flat = target.reshape(-1, act_dim).to(action_preds.device)[valid]
+        target_flat = action_target.reshape(-1, act_dim).to(action_preds.device)[valid]
         if preds_flat.numel() == 0:
             return torch.zeros((), device=action_preds.device, dtype=action_preds.dtype)
         return F.mse_loss(preds_flat, target_flat, reduction="mean")
@@ -477,7 +477,7 @@ def train(args):
             _broadcast_tensor(returns_to_go, src_global_rank=group_stage0_global, group=pipeline_group)
             _broadcast_tensor(traj_mask, src_global_rank=group_stage0_global, group=pipeline_group)
 
-            action_target = actions.clone()
+            action_target = (actions.clone(), traj_mask.clone())
 
             optimizer.zero_grad(set_to_none=True)
             losses: List[torch.Tensor] = []

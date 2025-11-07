@@ -209,6 +209,10 @@ class _QwenStageBase(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+        self.context_len = context_len
+        max_T = 3 * context_len
+        mask = torch.tril(torch.ones((max_T, max_T)))
+        self.register_buffer("causal_mask", mask.view(1, 1, max_T, max_T))
         self.blocks = nn.ModuleList(
             _PipelineQwenBlock(
                 hidden_size=hidden_size,
@@ -227,6 +231,10 @@ class _QwenStageBase(nn.Module):
         for blk in self.blocks:
             h = blk(h, attn_mask)
         return h
+
+    def _causal(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        mask = self.causal_mask[..., :seq_len, :seq_len].to(device=device)
+        return (mask == 0).to(dtype=dtype) * torch.finfo(dtype).min
 
 
 class _PipelineQwenBlock(nn.Module):
@@ -297,20 +305,12 @@ class QwenStageInput(_QwenStageBase):
         self.embed_state = nn.Linear(state_dim, hidden_size)
         self.embed_action = nn.Linear(act_dim, hidden_size)
         self.drop = nn.Dropout(drop_p)
-        max_T = 3 * context_len
-        mask = torch.tril(torch.ones((max_T, max_T)))
-        self.register_buffer("causal_mask", mask.view(1, 1, max_T, max_T))
-
-    def _causal(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        mask = self.causal_mask[..., :seq_len, :seq_len].to(device=device)
-        return (mask == 0).to(dtype=dtype) * torch.finfo(dtype).min
-
     def forward(
         self,
         inputs: Tuple[
             torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
         ],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         timesteps, states, actions, returns_to_go, traj_mask = inputs
         B, T, _ = states.shape
 
@@ -329,16 +329,14 @@ class QwenStageInput(_QwenStageBase):
         attn_mask = self._causal(h.size(1), device=h.device, dtype=h.dtype)
         h = self._run_blocks(h, attn_mask)
 
-        return h, attn_mask, traj_mask
+        return h
 
 
 class QwenStageMiddle(_QwenStageBase):
-    def forward(
-        self, inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        h, attn_mask, traj_mask = inputs
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        attn_mask = self._causal(h.size(1), device=h.device, dtype=h.dtype)
         h = self._run_blocks(h, attn_mask)
-        return h, attn_mask, traj_mask
+        return h
 
 
 class QwenStageOutput(_QwenStageBase):
@@ -375,20 +373,18 @@ class QwenStageOutput(_QwenStageBase):
             head_layers.append(nn.Tanh())
         self.predict_action = nn.Sequential(*head_layers)
 
-    def forward(
-        self, inputs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        h, attn_mask, traj_mask = inputs
+    def forward(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_mask = self._causal(h.size(1), device=h.device, dtype=h.dtype)
         h = self._run_blocks(h, attn_mask)
 
         B = h.size(0)
-        T = traj_mask.size(1)
+        T = self.context_len
         h = h.view(B, T, 3, self.hidden_size).permute(0, 2, 1, 3)
 
         return_preds = self.predict_rtg(h[:, 2])
         state_preds = self.predict_state(h[:, 2])
         action_preds = self.predict_action(h[:, 1])
-        return state_preds, action_preds, return_preds, traj_mask
+        return state_preds, action_preds, return_preds
 
 
 def build_qwen3_pipeline_stages(
