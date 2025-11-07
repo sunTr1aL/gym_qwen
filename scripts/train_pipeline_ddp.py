@@ -409,7 +409,6 @@ def train(args):
         loss_fn=action_loss_fn,
         args_chunk_spec=args_chunk_spec,
         output_merge_spec=output_merge_spec,
-        scale_grads=True,
     )
 
     optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=args.lr, weight_decay=args.wt_decay)
