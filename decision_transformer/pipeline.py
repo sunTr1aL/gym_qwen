@@ -242,7 +242,7 @@ class _PipelineQwenBlock(nn.Module):
         attn_dropout: float,
     ) -> None:
         super().__init__()
-        self.rope = RotaryEmbedding(
+        rope = RotaryEmbedding(
             head_dim=head_dim,
             max_position_embeddings=3 * context_len,
             rope_theta=rope_theta,
@@ -255,11 +255,11 @@ class _PipelineQwenBlock(nn.Module):
             mlp_ratio=mlp_ratio,
             attn_dropout=attn_dropout,
             bias=False,
-            rope=self.rope,
+            rope=rope,
         )
 
     def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        return self.inner(x, attn_mask, self.rope)
+        return self.inner(x, attn_mask)
 
 
 class QwenStageInput(_QwenStageBase):
