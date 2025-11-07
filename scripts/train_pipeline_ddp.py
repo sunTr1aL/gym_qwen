@@ -386,7 +386,7 @@ def train(args):
     stage_module_actual.train()
 
     args_chunk_spec = TensorChunkSpec.from_tuple((0, 0, 0, 0, 0))
-    output_merge_spec = TensorChunkSpec(0)
+    output_merge_spec = stage.output_chunk_spec
 
     def action_loss_fn(outputs, target):
         traj_mask = target[..., -1]
