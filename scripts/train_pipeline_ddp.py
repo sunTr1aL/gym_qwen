@@ -238,12 +238,12 @@ def train(args):
     pp_rank = rank % args.pipeline_stages
     _dbg(rank, f"dp_rank={dp_rank}, pp_rank={pp_rank}")
     
-    time.sleep(dp_rank+4)
+    time.sleep(dp_rank)
     pipeline_group = dist.new_group(ranks=pipeline_group_ranks[dp_rank])
-    print(f"[{dist.get_rank()}] 第一个")
+    print(f"[{dist.get_rank()}] 第一个 {pipeline_group_ranks[dp_rank]}")
     time.sleep(dist.get_rank()+1)
     stage_dp_group = dist.new_group(ranks=stage_dp_group_ranks[pp_rank])
-    print(f"[{dist.get_rank()}] 第二个")
+    print(f"[{dist.get_rank()}] 第二个 {stage_dp_group_ranks[pp_rank]}")
 
     pipeline_group_rank = dist.get_rank(pipeline_group)
     stage_dp_group_size = dist.get_world_size(stage_dp_group)
