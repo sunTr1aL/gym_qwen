@@ -228,12 +228,13 @@ def _gather_stage_states(
     pipeline_group: dist.ProcessGroup,
     stage_idx: int,
     is_group_root: bool,
+    group_root_global: int,
 ) -> Optional[List[Dict[str, torch.Tensor]]]:
     cpu_state = {k: v.detach().cpu() for k, v in stage_state.items()}
     gather_list: Optional[List[Dict[str, torch.Tensor]]] = None
     if is_group_root:
         gather_list = [dict() for _ in range(dist.get_world_size(pipeline_group))]
-    dist.gather_object(cpu_state, gather_list, dst=0, group=pipeline_group)
+    dist.gather_object(cpu_state, gather_list, dst=group_root_global, group=pipeline_group)
     if is_group_root:
         ordered: List[Dict[str, torch.Tensor]] = [dict() for _ in range(len(gather_list))]
         for rank_idx, payload in enumerate(gather_list):
@@ -475,6 +476,7 @@ def train(args):
             pipeline_group=pipeline_group,
             stage_idx=pp_rank,
             is_group_root=(pipeline_group_rank == 0),
+            group_root_global=group_stage0_global,
         )
         eval_reward: Optional[float] = None
         eval_ep_len: Optional[float] = None
@@ -653,6 +655,7 @@ def train(args):
         pipeline_group=pipeline_group,
         stage_idx=pp_rank,
         is_group_root=(pipeline_group_rank == 0),
+        group_root_global=group_stage0_global,
     )
 
     if pipeline_group_rank == 0:
