@@ -348,14 +348,15 @@ def train(args):
     # Build pipeline blueprint and schedule
     _dbg(rank, "building pipeline blueprint")
     blueprint_module, model_info, _ = _build_pipeline_blueprint(args, state_dim, act_dim)
+    blueprint_module = blueprint_module.to(device)
     micro_batch_size = args.batch_size // args.micro_batches
 
     example_inputs = (
-        torch.zeros((micro_batch_size, args.context_len), dtype=torch.long),
-        torch.zeros((micro_batch_size, args.context_len, state_dim), dtype=torch.float32),
-        torch.zeros((micro_batch_size, args.context_len, act_dim), dtype=torch.float32),
-        torch.zeros((micro_batch_size, args.context_len, 1), dtype=torch.float32),
-        torch.zeros((micro_batch_size, args.context_len), dtype=torch.float32),
+        torch.zeros((micro_batch_size, args.context_len), dtype=torch.long, device=device),
+        torch.zeros((micro_batch_size, args.context_len, state_dim), dtype=torch.float32, device=device),
+        torch.zeros((micro_batch_size, args.context_len, act_dim), dtype=torch.float32, device=device),
+        torch.zeros((micro_batch_size, args.context_len, 1), dtype=torch.float32, device=device),
+        torch.zeros((micro_batch_size, args.context_len), dtype=torch.float32, device=device),
     )
 
     _dbg(rank, "tracing pipeline with torch.distributed.pipelining")
