@@ -187,7 +187,7 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.head_dim = head_dim
         inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", inv_freq, persistent=True)
         self.max_position_embeddings = max_position_embeddings
 
     def forward(self, seqlen, device=None, dtype=None):
