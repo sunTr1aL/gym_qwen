@@ -462,7 +462,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda steps: min((steps + 1) / args.warmup_steps, 1.0))
     _dbg(rank, "optimizers ready")
 
-    total_progress_updates = args.max_train_iters * args.num_updates_per_iter * args.micro_batches
+    total_progress_updates = args.max_train_iters * args.num_updates_per_iter
     progress_tracker = ProgressTracker(total_progress_updates, args.progress_refresh) if rank == 0 else None
     latest_eval_reward = float("nan")
     latest_eval_ep_len = float("nan")
@@ -611,9 +611,9 @@ def train(args):
                 if rank == pipeline_group_ranks[0][0]:
                     stage_loss_values.append(float(aggregate.item()))
                     if progress_tracker is not None:
-                        progress_tracker.update(args.micro_batches)
+                        progress_tracker.update(1)
 
-            total_updates += args.micro_batches
+            total_updates += 1
 
         if pp_rank == 0 and rank == 0:
             mean_loss = float(np.mean(stage_loss_values)) if stage_loss_values else float("nan")
