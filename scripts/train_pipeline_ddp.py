@@ -22,13 +22,52 @@ from torch.utils.data import DataLoader, DistributedSampler
 def _dbg(rank: int, message: str):
     print(f"[rank {rank}] {message}", flush=True)
 
+
+class ProgressTracker:
+    def __init__(self, total_steps: int, refresh_interval_s: float = 2.0):
+        self.total = max(1, total_steps)
+        self.refresh = max(0.1, refresh_interval_s)
+        self.start = time.time()
+        self.last_render = self.start
+        self.completed = 0
+        self._last_bar = ""
+
+    def update(self, delta: int, force: bool = False) -> None:
+        self.completed = min(self.total, self.completed + max(0, delta))
+        now = time.time()
+        if force or (now - self.last_render) >= self.refresh or self.completed == self.total:
+            self._render(now)
+
+    def _render(self, now: float) -> None:
+        elapsed = max(now - self.start, 1e-6)
+        speed = self.completed / elapsed
+        ratio = self.completed / self.total
+        bar_len = 30
+        filled = int(bar_len * ratio)
+        bar = "#" * filled + "-" * (bar_len - filled)
+        remaining = self.total - self.completed
+        eta = remaining / speed if speed > 0 else float("inf")
+        eta_str = "N/A" if not math.isfinite(eta) else time.strftime("%H:%M:%S", time.gmtime(eta))
+        msg = (
+            f"\r[progress] |{bar}| {ratio*100:6.2f}% "
+            f"{self.completed}/{self.total} updates | {speed:6.2f} upd/s | ETA {eta_str}"
+        )
+        print(msg, end="", flush=True)
+        self._last_bar = msg
+        self.last_render = now
+
+    def close(self) -> None:
+        if self._last_bar:
+            print()
+            self._last_bar = ""
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from decision_transformer.pipeline import build_dt_pipeline_stages, build_qwen3_pipeline_stages
-from decision_transformer.utils import D4RLTrajectoryDataset
+from decision_transformer.utils import D4RLTrajectoryDataset, evaluate_on_env
 
 
 def _create_env(env_name: str):
@@ -203,6 +242,16 @@ def _gather_stage_states(
     return None
 
 
+def _strip_stage_prefix(stage_idx: int, state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Remove the leading 'stage_{idx}.' prefix applied by FX graph modules."""
+    prefix = f"stage_{stage_idx}."
+    cleaned: Dict[str, torch.Tensor] = {}
+    for key, tensor in state.items():
+        new_key = key[len(prefix):] if key.startswith(prefix) else key
+        cleaned[new_key] = tensor
+    return cleaned
+
+
 def train(args):
     dist.init_process_group(backend=args.dist_backend)
     world_size = dist.get_world_size()
@@ -350,6 +399,7 @@ def train(args):
     blueprint_module, model_info, _ = _build_pipeline_blueprint(args, state_dim, act_dim)
     blueprint_module = blueprint_module.to(device)
     micro_batch_size = args.batch_size // args.micro_batches
+    eval_model: Optional[SequentialPipelineModule] = None
 
     example_inputs = (
         torch.zeros((micro_batch_size, args.context_len), dtype=torch.long, device=device),
@@ -412,6 +462,51 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda steps: min((steps + 1) / args.warmup_steps, 1.0))
     _dbg(rank, "optimizers ready")
 
+    total_progress_updates = args.max_train_iters * args.num_updates_per_iter * args.micro_batches
+    progress_tracker = ProgressTracker(total_progress_updates, args.progress_refresh) if rank == 0 else None
+    latest_eval_reward = float("nan")
+    latest_eval_ep_len = float("nan")
+
+    def _evaluate_policy_if_needed() -> Tuple[Optional[float], Optional[float]]:
+        nonlocal eval_model
+        stage_state = stage_module_actual.state_dict()
+        stage_states = _gather_stage_states(
+            stage_state,
+            pipeline_group=pipeline_group,
+            stage_idx=pp_rank,
+            is_group_root=(pipeline_group_rank == 0),
+        )
+        eval_reward: Optional[float] = None
+        eval_ep_len: Optional[float] = None
+        if stage_states is not None and rank == pipeline_group_ranks[0][0] and env is not None:
+            if eval_model is None:
+                eval_model, _, _ = _build_pipeline_blueprint(args, state_dim, act_dim)
+                eval_model = eval_model.to(device)
+            for local_idx, state in enumerate(stage_states or []):
+                target_module = getattr(eval_model, f"stage_{local_idx}", None)
+                if target_module is None:
+                    continue
+                cleaned = _strip_stage_prefix(local_idx, state)
+                target_module.load_state_dict(cleaned, strict=False)
+            eval_model.eval()
+            with torch.no_grad():
+                results = evaluate_on_env(
+                    eval_model,
+                    device,
+                    args.context_len,
+                    env,
+                    rtg_target,
+                    args.rtg_scale,
+                    args.num_eval_ep,
+                    args.max_eval_ep_len,
+                    state_mean=state_mean,
+                    state_std=state_std,
+                )
+            eval_reward = float(results["eval/avg_reward"])
+            eval_ep_len = float(results["eval/avg_ep_len"])
+        dist.barrier()
+        return eval_reward, eval_ep_len
+
     log_dir = args.log_dir
     os.makedirs(log_dir, exist_ok=True)
 
@@ -428,7 +523,7 @@ def train(args):
     if rank == 0:
         csv_file = open(log_csv_path, "a", buffering=1)
         csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(["duration", "num_updates", "action_loss"])
+        csv_writer.writerow(["duration", "num_updates", "action_loss", "eval_avg_reward", "eval_avg_ep_len"])
         print("=" * 60)
         print("Distributed pipeline training configuration")
         print("=" * 60)
@@ -468,7 +563,8 @@ def train(args):
                 returns_to_go = torch.empty((args.batch_size, args.context_len, 1), dtype=torch.float32, device=device)
                 traj_mask = torch.empty((args.batch_size, args.context_len), dtype=torch.float32, device=device)
 
-            _dbg(rank, "broadcasting batch tensors")
+            if args.log_stage_steps:
+                _dbg(rank, "broadcasting batch tensors")
             _broadcast_tensor(timesteps, src_global_rank=group_stage0_global, group=pipeline_group)
             _broadcast_tensor(states, src_global_rank=group_stage0_global, group=pipeline_group)
             _broadcast_tensor(actions, src_global_rank=group_stage0_global, group=pipeline_group)
@@ -482,7 +578,8 @@ def train(args):
 
             optimizer.zero_grad(set_to_none=True)
             losses: List[torch.Tensor] = []
-            _dbg(rank, "running schedule step")
+            if args.log_stage_steps:
+                _dbg(rank, "running schedule step")
             schedule.step(
                 timesteps,
                 states,
@@ -513,17 +610,41 @@ def train(args):
                 aggregate /= float(stage_dp_group_size)
                 if rank == pipeline_group_ranks[0][0]:
                     stage_loss_values.append(float(aggregate.item()))
+                    if progress_tracker is not None:
+                        progress_tracker.update(args.micro_batches)
 
             total_updates += args.micro_batches
 
         if pp_rank == 0 and rank == 0:
             mean_loss = float(np.mean(stage_loss_values)) if stage_loss_values else float("nan")
             time_elapsed = str(datetime.now().replace(microsecond=0) - start_time)
+            if progress_tracker is not None:
+                progress_tracker.update(0, force=True)
+            reward_str = "N/A" if math.isnan(latest_eval_reward) else f"{latest_eval_reward:.5f}"
+            ep_len_str = "N/A" if math.isnan(latest_eval_ep_len) else f"{latest_eval_ep_len:.5f}"
             print("=" * 60)
             print(f"time elapsed: {time_elapsed}")
             print(f"num of updates: {total_updates}")
             print(f"action loss: {mean_loss:.5f}")
-            csv_writer.writerow([time_elapsed, total_updates, mean_loss])
+            print(f"eval avg reward: {reward_str}")
+            print(f"eval avg ep len: {ep_len_str}")
+            csv_writer.writerow([time_elapsed, total_updates, mean_loss, latest_eval_reward, latest_eval_ep_len])
+
+        should_eval = args.eval_interval > 0 and (
+            (iter_idx + 1) % args.eval_interval == 0 or iter_idx == args.max_train_iters - 1
+        )
+        if should_eval:
+            eval_reward, eval_ep_len = _evaluate_policy_if_needed()
+            if eval_reward is not None:
+                latest_eval_reward = eval_reward
+            if eval_ep_len is not None:
+                latest_eval_ep_len = eval_ep_len
+            if rank == pipeline_group_ranks[0][0] and eval_reward is not None:
+                print(
+                    f"[eval] iter={iter_idx + 1} "
+                    f"reward={latest_eval_reward:.3f} "
+                    f"ep_len={latest_eval_ep_len:.2f}"
+                )
 
     # Save final weights (gather stage states to pipeline group root then global rank 0 saves)
     state_dict = stage_module_actual.state_dict()
@@ -541,6 +662,8 @@ def train(args):
     dist.barrier()
 
     if rank == 0:
+        if progress_tracker is not None:
+            progress_tracker.close()
         torch.save(traced_pipe.split_gm.state_dict(), save_model_path)
         end_time = datetime.now().replace(microsecond=0)
         time_elapsed = str(end_time - start_time)
@@ -593,6 +716,12 @@ def main():
 
     parser.add_argument("--max_train_iters", type=int, default=200)
     parser.add_argument("--num_updates_per_iter", type=int, default=100)
+    parser.add_argument(
+        "--eval_interval",
+        type=int,
+        default=50,
+        help="Number of outer iterations between environment evaluations.",
+    )
 
     parser.add_argument("--pipeline_stages", type=int, default=4)
     parser.add_argument("--data_parallel_groups", type=int, default=2)
@@ -605,6 +734,17 @@ def main():
 
     parser.add_argument("--dist_backend", type=str, default="nccl")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--log_stage_steps",
+        action="store_true",
+        help="Print per-microbatch pipeline transfer logs (disabled by default).",
+    )
+    parser.add_argument(
+        "--progress_refresh",
+        type=float,
+        default=2.0,
+        help="Seconds between progress bar refreshes on rank 0.",
+    )
 
     args = parser.parse_args()
 
