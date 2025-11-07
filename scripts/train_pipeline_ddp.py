@@ -238,21 +238,19 @@ def train(args):
     pp_rank = rank % args.pipeline_stages
     _dbg(rank, f"dp_rank={dp_rank}, pp_rank={pp_rank}")
     
-    # 所有进程按同一顺序创建所有子组，然后各自索引到自己需要的那个
-    group_timeout = torch.distributed.timedelta(seconds=600)
     all_pipeline_groups = []
     for grp in pipeline_group_ranks:
-        g = dist.new_group(ranks=grp, backend=args.dist_backend, timeout=group_timeout)
+        g = dist.new_group(ranks=grp) 
         all_pipeline_groups.append(g)
     pipeline_group = all_pipeline_groups[dp_rank]
     print(f"[{dist.get_rank()}] 第一个 {pipeline_group_ranks[dp_rank]}")
-
     all_stage_dp_groups = []
     for grp in stage_dp_group_ranks:
-        g = dist.new_group(ranks=grp, backend=args.dist_backend, timeout=group_timeout)
+        g = dist.new_group(ranks=grp)
         all_stage_dp_groups.append(g)
     stage_dp_group = all_stage_dp_groups[pp_rank]
     print(f"[{dist.get_rank()}] 第二个 {stage_dp_group_ranks[pp_rank]}")
+
 
     pipeline_group_rank = dist.get_rank(pipeline_group)
     stage_dp_group_size = dist.get_world_size(stage_dp_group)
