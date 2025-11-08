@@ -254,7 +254,10 @@ def _save_pipeline_checkpoint(
     group_stage0_global: int,
     pp_rank: int,
     save_path: str,
+    sync_group: Optional[dist.ProcessGroup] = None,
 ) -> None:
+    if sync_group is None:
+        sync_group = dist.group.WORLD
     state_dict = stage_module_actual.state_dict()
     stage_states = _gather_stage_states(
         state_dict,
@@ -266,12 +269,12 @@ def _save_pipeline_checkpoint(
     if pipeline_group_rank == 0:
         for local_idx, state in enumerate(stage_states or []):
             traced_pipe.get_stage_module(local_idx).load_state_dict(state)
-    dist.barrier()
+    dist.barrier(group=sync_group)
     rank = dist.get_rank()
     if rank == 0:
         torch.save(traced_pipe.split_gm.state_dict(), save_path)
         _dbg(rank, f"saved checkpoint to {save_path}")
-    dist.barrier()
+    dist.barrier(group=sync_group)
 
 
 def _load_pipeline_checkpoint(
@@ -281,7 +284,10 @@ def _load_pipeline_checkpoint(
     pp_rank: int,
     checkpoint_path: str,
     strict: bool = True,
+    sync_group: Optional[dist.ProcessGroup] = None,
 ) -> None:
+    if sync_group is None:
+        sync_group = dist.group.WORLD
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint '{checkpoint_path}' not found.")
     rank = dist.get_rank()
@@ -296,7 +302,7 @@ def _load_pipeline_checkpoint(
     stage_state = traced_pipe.get_stage_module(pp_rank).state_dict()
     stage_module_actual.load_state_dict(stage_state, strict=strict)
     stage_module_actual.train()
-    dist.barrier()
+    dist.barrier(group=sync_group)
 
 
 def _infer_resume_progress_from_name(path: str) -> Tuple[Optional[int], Optional[int]]:
@@ -361,6 +367,7 @@ def train(args):
     dist.init_process_group(backend=args.dist_backend)
     world_size = dist.get_world_size()
     rank = dist.get_rank()
+    global_sync_group = dist.new_group(ranks=list(range(world_size)), backend="gloo")
 
     if args.micro_batches < args.pipeline_stages:
         raise ValueError(
@@ -418,7 +425,7 @@ def train(args):
     device = torch.device(f"cuda:{device_idx}")
     _dbg(rank, f"setting device {device}")
     torch.cuda.set_device(device)
-    dist.barrier()
+    dist.barrier(group=global_sync_group)
     _set_seed(args.seed + rank if args.seed is not None else None)
     _dbg(rank, f"device set to {device}")
 
@@ -453,7 +460,7 @@ def train(args):
     else:
         state_dim = 0
         act_dim = 0
-    dist.barrier()
+    dist.barrier(group=global_sync_group)
 
     group_stage0_global = pipeline_group_ranks[dp_rank][0]
     group_stage_last_global = pipeline_group_ranks[dp_rank][-1]
@@ -497,7 +504,7 @@ def train(args):
         data_loader = None
         data_iter = None
         state_mean, state_std = np.zeros((state_dim,), dtype=np.float32), np.ones((state_dim,), dtype=np.float32)
-    dist.barrier()
+    dist.barrier(group=global_sync_group)
 
     rtg_tensor = torch.tensor([rtg_target if rtg_target is not None else 0.0], dtype=torch.float32, device=device)
     rtg_tensor = _broadcast_tensor(rtg_tensor, src_global_rank=group_stage0_global, group=pipeline_group)
@@ -520,7 +527,7 @@ def train(args):
 
     _dbg(rank, "tracing pipeline with torch.distributed.pipelining")
     traced_pipe = make_pipeline(blueprint_module, example_inputs)
-    dist.barrier()
+    dist.barrier(group=global_sync_group)
     pipe_info = traced_pipe.info()
     stage_module = traced_pipe.get_stage_module(pp_rank)
 
@@ -579,6 +586,7 @@ def train(args):
             stage_module_actual=stage_module_actual,
             pp_rank=pp_rank,
             checkpoint_path=args.resume_checkpoint,
+            sync_group=global_sync_group,
         )
         inferred_iter, inferred_updates = _infer_resume_progress_from_name(args.resume_checkpoint)
         if args.resume_iter is not None:
@@ -647,7 +655,7 @@ def train(args):
                 eval_ep_len = float(results["eval/avg_ep_len"])
                 eval_model = eval_model.to(torch.device("cpu"))
                 _empty_cuda_cache(device)
-        dist.barrier()
+        dist.barrier(group=global_sync_group)
         return eval_reward, eval_ep_len
 
     log_dir = args.log_dir
@@ -796,6 +804,7 @@ def train(args):
                 group_stage0_global=group_stage0_global,
                 pp_rank=pp_rank,
                 save_path=checkpoint_path,
+                sync_group=global_sync_group,
             )
 
     _save_pipeline_checkpoint(
@@ -806,6 +815,7 @@ def train(args):
         group_stage0_global=group_stage0_global,
         pp_rank=pp_rank,
         save_path=save_model_path,
+        sync_group=global_sync_group,
     )
 
     if rank == 0:
@@ -824,7 +834,8 @@ def train(args):
         print("=" * 60)
         csv_file.close()  # type: ignore[union-attr]
 
-    dist.barrier()
+    dist.barrier(group=global_sync_group)
+    dist.destroy_process_group(global_sync_group)
     dist.destroy_process_group()
 
 
