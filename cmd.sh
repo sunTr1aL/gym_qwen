@@ -56,7 +56,7 @@ case "$CONFIG" in
       --pipeline_stages 4 \
       --data_parallel_groups 2 \
       --device_groups '0,1,2,3;4,5,6,7' \
-      --batch_size 128 \
+      --batch_size 64 \
       --micro_batches 16 \
       --n_blocks 20 \
       --embed_dim 1536 \
