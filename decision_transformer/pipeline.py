@@ -84,6 +84,10 @@ class DTStageInput(_DTStageBase):
         ).permute(0, 2, 1, 3).reshape(B, 3 * T, self.h_dim)
 
         h = self.embed_ln(h)
+        mask = traj_mask.unsqueeze(-1)
+        mask = torch.repeat_interleave(mask, repeats=3, dim=1)
+        h = h * mask
+
         h = self._run_blocks(h)
 
         return h, traj_mask
