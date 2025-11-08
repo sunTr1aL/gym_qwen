@@ -97,6 +97,19 @@ def evaluate_on_env(model, device, context_len, env, rtg_target, rtg_scale,
                     args = args + (traj_mask[:, start:end],)
                 return model.forward(*args)
 
+            def _split_model_outputs(outputs):
+                if isinstance(outputs, (tuple, list)):
+                    if len(outputs) < 3:
+                        raise ValueError(
+                            f"Model forward must return at least 3 tensors "
+                            f"(state_preds, action_preds, return_preds). Got {len(outputs)}."
+                        )
+                    return outputs[0], outputs[1], outputs[2]
+                raise ValueError(
+                    "Model forward output must be a tuple/list of tensors. "
+                    f"Got type '{type(outputs).__name__}'."
+                )
+
             # init episode
             reset_out = env.reset()
             if isinstance(reset_out, tuple):
@@ -122,11 +135,13 @@ def evaluate_on_env(model, device, context_len, env, rtg_target, rtg_scale,
                     traj_mask[0, t] = 1.0
 
                 if t < context_len:
-                    _, act_preds, _ = _forward_with_slice(0, context_len)
+                    model_outputs = _forward_with_slice(0, context_len)
+                    _, act_preds, _ = _split_model_outputs(model_outputs)
                     act = act_preds[0, t].detach()
                 else:
                     start = t - context_len + 1
-                    _, act_preds, _ = _forward_with_slice(start, t + 1)
+                    model_outputs = _forward_with_slice(start, t + 1)
+                    _, act_preds, _ = _split_model_outputs(model_outputs)
                     act = act_preds[0, -1].detach()
 
                 step_out = env.step(act.cpu().numpy())
