@@ -5,6 +5,7 @@ import os
 import random
 import time
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -225,7 +226,7 @@ def _broadcast_tensor(tensor: torch.Tensor, src_global_rank: int, group: dist.Pr
 
 def _gather_stage_states(
     stage_state: Dict[str, torch.Tensor],
-    pipeline_group: dist.ProcessGroup,
+    gather_group: dist.ProcessGroup,
     stage_idx: int,
     is_group_root: bool,
     group_root_global: int,
@@ -233,8 +234,8 @@ def _gather_stage_states(
     cpu_state = {k: v.detach().cpu() for k, v in stage_state.items()}
     gather_list: Optional[List[Dict[str, torch.Tensor]]] = None
     if is_group_root:
-        gather_list = [dict() for _ in range(dist.get_world_size(pipeline_group))]
-    dist.gather_object(cpu_state, gather_list, dst=group_root_global, group=pipeline_group)
+        gather_list = [dict() for _ in range(dist.get_world_size(gather_group))]
+    dist.gather_object(cpu_state, gather_list, dst=group_root_global, group=gather_group)
     if is_group_root:
         ordered: List[Dict[str, torch.Tensor]] = [dict() for _ in range(len(gather_list))]
         for rank_idx, payload in enumerate(gather_list):
@@ -247,7 +248,7 @@ def _save_pipeline_checkpoint(
     *,
     traced_pipe,
     stage_module_actual: nn.Module,
-    pipeline_group: dist.ProcessGroup,
+    gather_group: dist.ProcessGroup,
     pipeline_group_rank: int,
     group_stage0_global: int,
     pp_rank: int,
@@ -256,7 +257,7 @@ def _save_pipeline_checkpoint(
     state_dict = stage_module_actual.state_dict()
     stage_states = _gather_stage_states(
         state_dict,
-        pipeline_group=pipeline_group,
+        gather_group=gather_group,
         stage_idx=pp_rank,
         is_group_root=(pipeline_group_rank == 0),
         group_root_global=group_stage0_global,
@@ -280,6 +281,44 @@ def _strip_stage_prefix(stage_idx: int, state: Dict[str, torch.Tensor]) -> Dict[
         new_key = key[len(prefix):] if key.startswith(prefix) else key
         cleaned[new_key] = tensor
     return cleaned
+
+
+def _move_optimizer_state(optimizer: Optional[torch.optim.Optimizer], device: torch.device) -> None:
+    if optimizer is None:
+        return
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device, non_blocking=True)
+
+
+def _empty_cuda_cache(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+    with torch.cuda.device(device):
+        torch.cuda.empty_cache()
+
+
+@contextmanager
+def _temporarily_offload_module(
+    module: nn.Module,
+    optimizer: Optional[torch.optim.Optimizer],
+    device: torch.device,
+) -> None:
+    if device.type != "cuda":
+        yield
+        return
+    cpu_device = torch.device("cpu")
+    module.to(cpu_device)
+    _move_optimizer_state(optimizer, cpu_device)
+    _empty_cuda_cache(device)
+    try:
+        yield
+    finally:
+        module.to(device)
+        _move_optimizer_state(optimizer, device)
+        module.train()
+        _empty_cuda_cache(device)
 
 
 def train(args):
@@ -318,10 +357,14 @@ def train(args):
     _dbg(rank, f"dp_rank={dp_rank}, pp_rank={pp_rank}")
     
     all_pipeline_groups = []
+    all_pipeline_groups_cpu = []
     for grp in pipeline_group_ranks:
-        g = dist.new_group(ranks=grp) 
+        g = dist.new_group(ranks=grp)
         all_pipeline_groups.append(g)
+        g_cpu = dist.new_group(ranks=grp, backend="gloo")
+        all_pipeline_groups_cpu.append(g_cpu)
     pipeline_group = all_pipeline_groups[dp_rank]
+    pipeline_group_cpu = all_pipeline_groups_cpu[dp_rank]
     print(f"[{dist.get_rank()}] 第一个 {pipeline_group_ranks[dp_rank]}")
     all_stage_dp_groups = []
     for grp in stage_dp_group_ranks:
@@ -502,39 +545,45 @@ def train(args):
         stage_state = stage_module_actual.state_dict()
         stage_states = _gather_stage_states(
             stage_state,
-            pipeline_group=pipeline_group,
+            gather_group=pipeline_group_cpu,
             stage_idx=pp_rank,
             is_group_root=(pipeline_group_rank == 0),
             group_root_global=group_stage0_global,
         )
         eval_reward: Optional[float] = None
         eval_ep_len: Optional[float] = None
-        if stage_states is not None and rank == pipeline_group_ranks[0][0] and env is not None:
+        should_run_eval = stage_states is not None and rank == pipeline_group_ranks[0][0] and env is not None
+        if should_run_eval:
             if eval_model is None:
                 eval_model, _, _ = _build_pipeline_blueprint(args, state_dim, act_dim)
-                eval_model = eval_model.to(device)
+                eval_model = eval_model.to(torch.device("cpu"))
             for local_idx, state in enumerate(stage_states or []):
                 target_module = getattr(eval_model, f"stage_{local_idx}", None)
                 if target_module is None:
                     continue
                 cleaned = _strip_stage_prefix(local_idx, state)
                 target_module.load_state_dict(cleaned, strict=False)
-            eval_model.eval()
-            with torch.no_grad():
-                results = evaluate_on_env(
-                    eval_model,
-                    device,
-                    args.context_len,
-                    env,
-                    rtg_target,
-                    args.rtg_scale,
-                    args.num_eval_ep,
-                    args.max_eval_ep_len,
-                    state_mean=state_mean,
-                    state_std=state_std,
-                )
-            eval_reward = float(results["eval/avg_reward"])
-            eval_ep_len = float(results["eval/avg_ep_len"])
+            with _temporarily_offload_module(stage_module_actual, optimizer, device):
+                eval_model = eval_model.to(device)
+                _empty_cuda_cache(device)
+                eval_model.eval()
+                with torch.no_grad():
+                    results = evaluate_on_env(
+                        eval_model,
+                        device,
+                        args.context_len,
+                        env,
+                        rtg_target,
+                        args.rtg_scale,
+                        args.num_eval_ep,
+                        args.max_eval_ep_len,
+                        state_mean=state_mean,
+                        state_std=state_std,
+                    )
+                eval_reward = float(results["eval/avg_reward"])
+                eval_ep_len = float(results["eval/avg_ep_len"])
+                eval_model = eval_model.to(torch.device("cpu"))
+                _empty_cuda_cache(device)
         dist.barrier()
         return eval_reward, eval_ep_len
 
@@ -679,7 +728,7 @@ def train(args):
             _save_pipeline_checkpoint(
                 traced_pipe=traced_pipe,
                 stage_module_actual=stage_module_actual,
-                pipeline_group=pipeline_group,
+                gather_group=pipeline_group_cpu,
                 pipeline_group_rank=pipeline_group_rank,
                 group_stage0_global=group_stage0_global,
                 pp_rank=pp_rank,
@@ -689,7 +738,7 @@ def train(args):
     _save_pipeline_checkpoint(
         traced_pipe=traced_pipe,
         stage_module_actual=stage_module_actual,
-        pipeline_group=pipeline_group,
+        gather_group=pipeline_group_cpu,
         pipeline_group_rank=pipeline_group_rank,
         group_stage0_global=group_stage0_global,
         pp_rank=pp_rank,

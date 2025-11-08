@@ -71,7 +71,7 @@ case "$CONFIG" in
       --warmup_steps 12000 \
       --grad_clip 0.25 \
       --max_train_iters 100 \
-      --num_updates_per_iter 1000 \
+      --num_updates_per_iter 1 \
       --eval_interval 1 \
       --progress_refresh 2.0 \
       --log_dir dt_runs/gpt1b_pp \
