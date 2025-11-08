@@ -32,10 +32,10 @@ case "$CONFIG" in
       --device_groups '0,1,2,3;4,5,6,7' \
       --batch_size 128 \
       --micro_batches 16 \
-      --n_blocks 32 \
-      --embed_dim 1664 \
-      --n_heads 13 \
-      --num_kv_heads 7 \
+      --n_blocks 20 \
+      --embed_dim 1536 \
+      --n_heads 12 \
+      --num_kv_heads 6 \
       --head_dim 128 \
       --lr 8e-5 \
       --warmup_steps 12000 \
@@ -58,7 +58,7 @@ case "$CONFIG" in
       --device_groups '0,1,2,3;4,5,6,7' \
       --batch_size 128 \
       --micro_batches 16 \
-      --n_blocks 32 \
+      --n_blocks 20 \
       --embed_dim 1536 \
       --n_heads 24 \
       --dropout_p 0.1 \
