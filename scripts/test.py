@@ -4,6 +4,7 @@ import sys
 import math
 import gymnasium as gym
 import torch
+import torch.nn as nn
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +19,10 @@ from decision_transformer.utils import (
     D4RLTrajectoryDataset,
 )
 from decision_transformer.model import DecisionTransformer, DecisionTransformerQwen3
+from decision_transformer.pipeline import (
+    build_dt_pipeline_stages,
+    build_qwen3_pipeline_stages,
+)
 
 
 def _resolve_qwen_dims(args):
@@ -87,6 +92,93 @@ def _build_model(args, state_dim, act_dim, device):
         raise ValueError(f"Unsupported model '{args.model}'. Expected 'dt' or 'qwen3'.")
 
     return model.to(device), info
+
+
+class SequentialPipelineModule(nn.Module):
+    def __init__(self, stages):
+        super().__init__()
+        self.num_stages = len(stages)
+        for idx, stage in enumerate(stages):
+            self.add_module(f"stage_{idx}", stage)
+
+    def forward(self, timesteps, states, actions, returns_to_go, traj_mask):
+        output = getattr(self, "stage_0")((timesteps, states, actions, returns_to_go, traj_mask))
+        for idx in range(1, self.num_stages):
+            stage = getattr(self, f"stage_{idx}")
+            output = stage(output)
+        return output
+
+
+def _build_pipeline_model(args, state_dim, act_dim, device):
+    model_choice = args.model.lower()
+    use_action_tanh = True
+    if model_choice == 'dt':
+        stages, layout = build_dt_pipeline_stages(
+            state_dim=state_dim,
+            act_dim=act_dim,
+            context_len=args.context_len,
+            n_blocks=args.n_blocks,
+            h_dim=args.embed_dim,
+            n_heads=args.n_heads,
+            drop_p=args.dropout_p,
+            max_timestep=args.max_timestep,
+            use_action_tanh=use_action_tanh,
+            num_stages=args.pipeline_stages,
+        )
+        info = f"DT pipeline | hidden={args.embed_dim}, heads={args.n_heads}, per_stage={layout}"
+    elif model_choice == 'qwen3':
+        hidden_size, num_heads, num_kv_heads, head_dim = _resolve_qwen_dims(args)
+        stages, layout = build_qwen3_pipeline_stages(
+            state_dim=state_dim,
+            act_dim=act_dim,
+            context_len=args.context_len,
+            n_layers=args.n_blocks,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            attn_dropout=args.attn_dropout,
+            drop_p=args.dropout_p,
+            rope_theta=args.rope_theta,
+            max_timestep=args.max_timestep,
+            use_action_tanh=use_action_tanh,
+            num_stages=args.pipeline_stages,
+        )
+        info = (
+            f"Qwen3 pipeline | hidden={hidden_size}, heads={num_heads}, "
+            f"kv_heads={num_kv_heads}, head_dim={head_dim}, per_stage={layout}"
+        )
+    else:
+        raise ValueError(f"Unsupported pipeline model '{args.model}'.")
+    return SequentialPipelineModule(stages).to(device), info
+
+
+def _detect_checkpoint_format(state_dict, override):
+    if override != "auto":
+        return override
+    for key in state_dict.keys():
+        if key.startswith("submod_") or key.startswith("stage_0"):
+            return "pipeline"
+    return "standard"
+
+
+def _extract_pipeline_state_dict(state_dict):
+    cleaned = {}
+    for key, value in state_dict.items():
+        new_key = key
+        if key.startswith("submod_"):
+            parts = key.split(".", 2)
+            if len(parts) >= 2 and parts[1].startswith("stage_"):
+                new_key = parts[1]
+                if len(parts) == 3:
+                    new_key = f"{new_key}.{parts[2]}"
+        if new_key.startswith("stage_"):
+            cleaned[new_key] = value
+    if not cleaned:
+        raise RuntimeError(
+            "Checkpoint appears to use pipeline format, but no 'stage_' parameters were found."
+        )
+    return cleaned
 
 
 def _create_env(env_name, render=False):
@@ -200,16 +292,25 @@ def test(args):
 
     for idx, eval_chk_pt_name in enumerate(eval_chk_pt_list):
 
-        eval_model, model_info = _build_model(args, state_dim, act_dim, device)
+        eval_chk_pt_path = os.path.join(eval_chk_pt_dir, eval_chk_pt_name)
+        checkpoint_state = torch.load(eval_chk_pt_path, map_location="cpu")
+        ckpt_format = _detect_checkpoint_format(checkpoint_state, args.ckpt_format)
+
+        if ckpt_format == "pipeline":
+            eval_model, model_info = _build_pipeline_model(args, state_dim, act_dim, device)
+            cleaned_state = _extract_pipeline_state_dict(checkpoint_state)
+            eval_model.load_state_dict(cleaned_state, strict=True)
+        else:
+            eval_model, model_info = _build_model(args, state_dim, act_dim, device)
+            eval_model.load_state_dict(checkpoint_state, strict=True)
+
+        del checkpoint_state
+
         if idx == 0:
+            print(f"checkpoint format: {ckpt_format}")
             print("model resolved dims: " + model_info)
             param_total = sum(p.numel() for p in eval_model.parameters())
             print(f"model parameter count: {param_total / 1e6:.3f}M")
-
-        eval_chk_pt_path = os.path.join(eval_chk_pt_dir, eval_chk_pt_name)
-
-        # load checkpoint
-        eval_model.load_state_dict(torch.load(eval_chk_pt_path, map_location=device))
 
         print("model loaded from: " + eval_chk_pt_path)
 
@@ -268,6 +369,10 @@ if __name__ == "__main__":
     parser.add_argument('--attn_dropout', type=float, default=0.1)
     parser.add_argument('--max_timestep', type=int, default=4096)
     parser.add_argument('--rope_theta', type=float, default=10_000.0)
+    parser.add_argument('--pipeline_stages', type=int, default=4,
+            help='Number of pipeline stages to use when reconstructing pipeline checkpoints.')
+    parser.add_argument('--ckpt_format', type=str, default='auto', choices=['auto', 'standard', 'pipeline'],
+            help="Force checkpoint format detection. Use 'pipeline' for checkpoints saved by train_pipeline_ddp.py.")
 
     parser.add_argument('--device', type=str, default='cuda')
 
