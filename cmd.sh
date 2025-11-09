@@ -125,7 +125,7 @@ case "$CONFIG" in
       --num_updates_per_iter 1000 \
       --eval_interval 1 \
       --progress_refresh 2.0 \
-      --log_dir dt_runs/gpt1b_pp_expert_ft \
+      --log_dir dt_runs/gpt1b_pp_expert_ft2 \
       --resume_checkpoint dt_runs/gpt1b_pp_expert_ft/dtpp_humanoid-expert-v5_ckpt_iter00036_updates00036000.pt \
       --dist_backend nccl "${EXTRA_ARGS[@]}"
     ;;
