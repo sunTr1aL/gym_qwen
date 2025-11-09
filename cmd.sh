@@ -118,7 +118,7 @@ case "$CONFIG" in
       --embed_dim 1536 \
       --n_heads 24 \
       --dropout_p 0.1 \
-      --lr 3e-5 \
+      --lr 1e-6 \
       --warmup_steps 2000 \
       --grad_clip 0.25 \
       --max_train_iters 100 \
@@ -126,7 +126,7 @@ case "$CONFIG" in
       --eval_interval 1 \
       --progress_refresh 2.0 \
       --log_dir dt_runs/gpt1b_pp_expert_ft \
-      --resume_checkpoint dt_runs/gpt1b_pp/dtpp_humanoid-medium-v5_ckpt_iter00025_updates00025000.pt \
+      --resume_checkpoint dt_runs/gpt1b_pp_expert_ft/dtpp_humanoid-expert-v5_ckpt_iter00036_updates00036000.pt \
       --dist_backend nccl "${EXTRA_ARGS[@]}"
     ;;
 esac
