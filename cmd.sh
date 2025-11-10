@@ -42,7 +42,7 @@ case "$CONFIG" in
       --n_heads 12 \
       --num_kv_heads 6 \
       --head_dim 128 \
-      --lr 8e-5 \
+      --lr 1e-5 \
       --warmup_steps 12000 \
       --grad_clip 0.25 \
       --max_train_iters 100 \
