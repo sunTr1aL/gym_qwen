@@ -6,6 +6,7 @@ from common.scale import RunningScale
 from common.world_model import WorldModel
 from common.layers import api_model_conversion
 from tensordict import TensorDict
+from .speculative_manager import SpeculativeManager
 
 
 class TDMPC2(torch.nn.Module):
@@ -17,9 +18,9 @@ class TDMPC2(torch.nn.Module):
 
 	def __init__(self, cfg):
 		super().__init__()
-		self.cfg = cfg
-		device_str = cfg.get('device', 'cuda')
-		self.device = torch.device(device_str)
+                self.cfg = cfg
+                device_str = cfg.get('device', 'cuda')
+                self.device = torch.device(device_str)
 		if self.device.type != 'cuda' and getattr(self.cfg, 'compile', False):
 			print('Disabling torch.compile on non-CUDA device.')
 			self.cfg.compile = False
@@ -37,12 +38,14 @@ class TDMPC2(torch.nn.Module):
 		self.model.eval()
 		self.scale = RunningScale(cfg, device=self.device)
 		self.cfg.iterations += 2*int(cfg.action_dim >= 20) # Heuristic for large action spaces
-		self.discount = torch.tensor(
-			[self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device=self.device
-		) if self.cfg.multitask else torch.tensor(self._get_discount(cfg.episode_length), device=self.device)
-		self._action_buffer = []
-		print('Episode length:', cfg.episode_length)
-		print('Discount factor:', self.discount)
+                self.discount = torch.tensor(
+                        [self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device=self.device
+                ) if self.cfg.multitask else torch.tensor(self._get_discount(cfg.episode_length), device=self.device)
+                self._action_buffer = []
+                self._spec_plan_buffer = []
+                self.spec_manager = SpeculativeManager(self.model, cfg, self.device)
+                print('Episode length:', cfg.episode_length)
+                print('Discount factor:', self.discount)
 		self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.horizon, self.cfg.action_dim, device=self.device))
 		if cfg.compile:
 			print('Compiling update function with torch.compile...')
@@ -111,30 +114,59 @@ class TDMPC2(torch.nn.Module):
 			eval_mode (bool): Whether to use the mean of the action distribution.
 			task (int): Task index (only used for multi-task experiments).
 
-		Returns:
-			torch.Tensor: Action to take in the environment.
-		"""
-		obs = obs.to(self.device, non_blocking=True).unsqueeze(0)
-		if task is not None:
-			task = torch.tensor([task], device=self.device)
-		chunk = int(getattr(self.cfg, "plan_chunk", 1))
-		if t0:
-			self._action_buffer.clear()
-		if chunk > 1:
-			if self._action_buffer:
-				return self._action_buffer.pop(0)
-			actions_seq = self.plan(obs, t0=t0, eval_mode=eval_mode, task=task, return_sequence=True).cpu()
-			# Only reuse up to chunk actions from this plan
-			actions_seq = actions_seq[:chunk]
-			self._action_buffer = [a for a in actions_seq]
-			return self._action_buffer.pop(0)
-		if self.cfg.mpc:
-			return self.plan(obs, t0=t0, eval_mode=eval_mode, task=task).cpu()
-		z = self.model.encode(obs, task)
-		action, info = self.model.pi(z, task)
-		if eval_mode:
-			action = info["mean"]
-		return action[0].cpu()
+                Returns:
+                        torch.Tensor: Action to take in the environment.
+                """
+                obs = obs.to(self.device, non_blocking=True).unsqueeze(0)
+                if task is not None:
+                        task = torch.tensor([task], device=self.device)
+                if t0:
+                        self._action_buffer.clear()
+                        self._spec_plan_buffer.clear()
+                        self.spec_manager.reset()
+                z_t = self.model.encode(obs, task)
+                chunk = int(getattr(self.cfg, "plan_chunk", 1))
+                speculative_info = None
+                if self.cfg.speculate and not t0:
+                        speculative_info = self.spec_manager.consume(z_t, task)
+                        if speculative_info and speculative_info["accepted"]:
+                                self._action_buffer = [a.cpu() for a in speculative_info.get("remainder", [])]
+                                action = speculative_info["action"]
+                                if eval_mode and "mean" in speculative_info:
+                                        action = speculative_info["mean"]
+                                return action.detach().cpu()
+                        elif speculative_info:
+                                # Miss: recycle the best branch as a provisional warm start.
+                                self._spec_plan_buffer = [speculative_info["action"].cpu()]
+                                self._spec_plan_buffer += [a.cpu() for a in speculative_info.get("remainder", [])]
+
+                # Fallback to existing planning / prior logic
+                if chunk > 1:
+                        if self._action_buffer:
+                                action = self._action_buffer.pop(0)
+                        elif self._spec_plan_buffer:
+                                self._action_buffer = self._spec_plan_buffer
+                                self._spec_plan_buffer = []
+                                action = self._action_buffer.pop(0)
+                        else:
+                                actions_seq = self.plan(obs, t0=t0, eval_mode=eval_mode, task=task, return_sequence=True).cpu()
+                                actions_seq = actions_seq[:chunk]
+                                self._action_buffer = [a for a in actions_seq]
+                                self._spec_plan_buffer = []
+                                action = self._action_buffer.pop(0)
+                elif self.cfg.mpc:
+                        action = self.plan(obs, t0=t0, eval_mode=eval_mode, task=task)
+                        self._spec_plan_buffer = []
+                else:
+                        action, info = self.model.pi(z_t, task)
+                        if eval_mode:
+                                action = info["mean"]
+                        action = action[0]
+                        self._spec_plan_buffer = []
+
+                if self.cfg.speculate:
+                        self.spec_manager.schedule(z_t, action, task)
+                return action.cpu()
 
 	@torch.no_grad()
 	def _estimate_value(self, z, actions, task, record_traj=False):

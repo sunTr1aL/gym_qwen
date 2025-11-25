@@ -44,6 +44,10 @@ min_std: 0.05
 max_std: 2
 temperature: 0.5
 plan_chunk: 1
+speculate: false
+beam_width: 4
+spec_depth: 3
+spec_tau: 0.1
 
 # actor
 log_std_min: -10
