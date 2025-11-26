@@ -19,7 +19,12 @@ class CorrectorDataset(Dataset):
         self.z_pred = data["z_pred"][mask]
         self.a_plan = data["a_plan"][mask]
         self.a_teacher = data["a_teacher"][mask]
-        self.history = data.get("history_feats")
+
+        hist = data.get("history_feats")
+        if hist is not None:
+            self.history = hist[mask].to(self.z_real.device)
+        else:
+            self.history = None
         self.history_shape = self.history.shape[1:] if self.history is not None else None
         # Placeholder used when no history is available to avoid None collation.
         self.empty_history = torch.empty((0, 0), device=self.z_real.device, dtype=self.z_real.dtype)
