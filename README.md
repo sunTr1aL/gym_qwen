@@ -4,17 +4,23 @@ This repository extends the open-source TD-MPC/TD-MPC2 control stack with specul
 
 The codebase is intended for research on speeding up model-based control with minimal performance loss. It builds on the official TD-MPC/TD-MPC2 releases but is **not** an official implementation of those projects.
 
+-----
+
 ## Features
 - Single-task TD-MPC2-style training for continuous control tasks (Hydra configuration in `tdmpc2/config.yaml`).
 - Speculative multi-step execution of TD-MPC2 plans to reduce replanning frequency.
 - Learned corrector trained by distillation from a TD-MPC2 teacher to adjust speculative actions when real states deviate from predictions.
 - End-to-end scripts for training the TD-MPC2 teacher, collecting distillation data, training the corrector, and evaluating speculative execution at different horizons.
 
+-----
+
 ## Repository layout
 - `tdmpc2/tdmpc2/` – TD-MPC2-style agent, speculative execution utilities, corrector implementations, and Hydra configs.
 - `tdmpc2/scripts/` – Command-line entry points for corrector data collection and speculative-execution evaluation.
 - `tdmpc2/docker/` – Example conda environment (`environment.yaml`) and Dockerfile for running MuJoCo-based tasks.
 - `logs/` (created at runtime) – Default location for training/evaluation logs and checkpoints.
+
+-----
 
 ## Installation
 1. Use Python 3.9+.
@@ -32,7 +38,9 @@ The codebase is intended for research on speeding up model-based control with mi
    ```
 4. Ensure MuJoCo and required control suites are available (e.g., `dm-control`, `mujoco` Python package). Set `MUJOCO_GL=egl` if running headless.
 
-## 5. Training the TD-MPC2 Teacher
+-----
+
+## Training the TD-MPC2 Teacher
 Train the single-task TD-MPC2-style agent with Hydra (defaults in `tdmpc2/config.yaml`). Example:
 ```bash
 cd tdmpc2
@@ -47,7 +55,9 @@ python tdmpc2/train.py \
 - Checkpoints and logs are stored under `logs/<task>/<seed>/<exp_name>/`.
 - Use `device=cpu` to run without CUDA (slower).
 
-## 6. Collecting Corrector Training Data
+-----
+
+## Collecting Corrector Training Data
 Generate distillation data from the TD-MPC2 teacher for the learned corrector:
 ```bash
 cd tdmpc2
@@ -62,7 +72,9 @@ python scripts/collect_corrector_data.py \
 ```
 The script runs the TD-MPC2 teacher in evaluation mode, logs planned actions and TD-MPC2 replans when real states deviate from predictions, and saves tensors (`z_real`, `z_pred`, `a_plan`, `a_teacher`, `distance`, optional history features) for offline corrector training.
 
-## 7. Training the Corrector (Distillation)
+-----
+
+## Training the Corrector (Distillation)
 Train the learned corrector on the collected dataset:
 ```bash
 cd tdmpc2
@@ -86,7 +98,9 @@ python tdmpc2/train_corrector.py \
 ```
 The corrector is distilled to imitate TD-MPC2 replanning behavior so speculative actions can be adjusted when real trajectories diverge from planned ones.
 
-## 8. Evaluating Speculative Execution
+-----
+
+## Evaluating Speculative Execution
 Use `scripts/eval_corrector.py` to compare baseline TD-MPC2 and speculative execution variants.
 
 1. **Baseline TD-MPC2 (no speculation)**
@@ -139,15 +153,41 @@ Use `scripts/eval_corrector.py` to compare baseline TD-MPC2 and speculative exec
 
 Metrics are printed to stdout; optionally save JSON metrics with `--output_metrics_path <file>`.
 
-## 9. Reproducibility and Logging
+-----
+
+## 9. Distributed Multi-GPU Training (DDP)
+Use the provided DDP tooling to scale TD-MPC2 training across multiple GPUs:
+
+- Quick-start shell script (8 GPUs by default):
+  ```bash
+  cd tdmpc2
+  ./run_ddp_8gpu.sh dog-run 5
+  ```
+- Direct Python invocation with custom settings:
+  ```bash
+  cd tdmpc2
+  python train_ddp.py task=humanoid-run model_size=19 world_size=4 sync_freq=2 batch_size=256
+  ```
+- Config-driven launch:
+  ```bash
+  cd tdmpc2
+  python train_ddp.py --config-name=config_ddp
+  ```
+-----
+
+## Reproducibility and Logging
 - Set `seed=<int>` (Hydra for training/evaluation; CLI flag for scripts) to control randomness.
 - Training/evaluation logs, videos, and checkpoints default to `logs/<task>/<seed>/<exp_name>/`.
 - For stable comparisons, run multiple seeds and report average returns.
 
-## 10. Citing & Acknowledgements
+-----
+
+## Citing & Acknowledgements
 This repository builds on TD-MPC and TD-MPC2 but is an independent extension with speculative execution and a learned corrector.
 - TD-MPC code: https://github.com/nicklashansen/tdmpc  |  Paper: “Temporal Difference Learning for Model Predictive Control” (Hansen et al., ICML 2022), arXiv:2203.04955.
 - TD-MPC2 code: https://github.com/nicklashansen/tdmpc2  |  Paper: “TD-MPC2: Scalable, Robust World Models for Continuous Control”, arXiv:2310.16828.
 
-## 11. License
+-----
+
+## License
 This project is licensed under the terms of the existing `LICENSE` file (MIT).
