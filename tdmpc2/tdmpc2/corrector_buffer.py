@@ -73,6 +73,7 @@ class CorrectorBuffer:
                         "z_real": self._z_real,
                         "z_pred": self._z_pred,
                         "a_spec": self._a_spec,
+                        "a_plan": self._a_spec,
                         "a_teacher": self._a_teacher,
                         "accepted": self._accepted,
                         "distance": self._distance,
@@ -81,7 +82,7 @@ class CorrectorBuffer:
         def load_state_dict(self, state: Dict[str, List]) -> None:
                 self._z_real = list(state.get("z_real", []))
                 self._z_pred = list(state.get("z_pred", []))
-                self._a_spec = list(state.get("a_spec", []))
+                self._a_spec = list(state.get("a_spec", state.get("a_plan", [])))
                 self._a_teacher = list(state.get("a_teacher", []))
                 self._accepted = list(state.get("accepted", []))
                 self._distance = list(state.get("distance", []))

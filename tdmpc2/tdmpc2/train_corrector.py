@@ -29,15 +29,43 @@ class CorrectorDataset(Dataset):
         return self.z_real[idx], self.z_pred[idx], self.a_plan[idx], self.a_teacher[idx], hist
 
 
+_ACTION_FALLBACK_WARNED = False
+
+
+def _select_action_tensor(state: Dict[str, torch.Tensor]) -> torch.Tensor:
+    """Return the planned/speculative action tensor with legacy compatibility."""
+
+    global _ACTION_FALLBACK_WARNED
+    if "a_plan" in state:
+        return state["a_plan"]
+    if "a_spec" in state:
+        if not _ACTION_FALLBACK_WARNED:
+            print("WARNING: 'a_plan' missing in buffer, using 'a_spec' instead.")
+            _ACTION_FALLBACK_WARNED = True
+        return state["a_spec"]
+    raise ValueError("Missing action key in buffer: expected 'a_plan' or 'a_spec'.")
+
+
 def load_tensor_dict(path: Path, device: torch.device) -> Dict[str, torch.Tensor]:
     state = torch.load(path, map_location=device)
     if isinstance(state, list):
         raise ValueError("Expected a dict of tensors in the dataset file.")
-    required = {"z_real", "z_pred", "a_plan", "a_teacher"}
+
+    required = {"z_real", "z_pred", "a_teacher"}
     missing = required - set(state.keys())
     if missing:
         raise ValueError(f"Missing keys in buffer: {missing}")
-    return {k: (torch.stack(v) if isinstance(v, list) else v).to(device) for k, v in state.items()}
+
+    action_tensor = _select_action_tensor(state)
+
+    processed = {k: (torch.stack(v) if isinstance(v, list) else v).to(device) for k, v in state.items()}
+    processed["a_plan"] = (torch.stack(action_tensor) if isinstance(action_tensor, list) else action_tensor).to(
+        device
+    )
+    # Preserve optional a_spec for compatibility across mixed datasets.
+    if "a_spec" not in processed:
+        processed["a_spec"] = processed["a_plan"]
+    return processed
 
 
 def maybe_concat(paths: List[Path], device: torch.device) -> Dict[str, torch.Tensor]:
