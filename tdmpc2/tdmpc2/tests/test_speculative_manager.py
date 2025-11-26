@@ -81,6 +81,7 @@ def test_branch_selection_matches_closest_prediction():
 
         assert result is not None and result["accepted"]
         assert torch.allclose(result["action"], branch_a.actions[0])
+        assert torch.allclose(result["z_pred"], branch_a.z_sequence[0])
 
 
 def test_speculative_reuse_reduces_planning_calls():
