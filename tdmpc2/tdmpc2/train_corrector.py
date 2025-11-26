@@ -20,12 +20,15 @@ class CorrectorDataset(Dataset):
         self.a_plan = data["a_plan"][mask]
         self.a_teacher = data["a_teacher"][mask]
         self.history = data.get("history_feats")
+        self.history_shape = self.history.shape[1:] if self.history is not None else None
+        # Placeholder used when no history is available to avoid None collation.
+        self.empty_history = torch.empty((0, 0), device=self.z_real.device, dtype=self.z_real.dtype)
 
     def __len__(self) -> int:
         return self.z_real.shape[0]
 
     def __getitem__(self, idx):
-        hist = self.history[idx] if self.history is not None else None
+        hist = self.history[idx] if self.history is not None else self.empty_history
         return self.z_real[idx], self.z_pred[idx], self.a_plan[idx], self.a_teacher[idx], hist
 
 
@@ -158,9 +161,16 @@ def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             z_pred = z_pred.to(device, non_blocking=True)
             a_plan = a_plan.to(device, non_blocking=True)
             a_teacher = a_teacher.to(device, non_blocking=True)
-            history = history.to(device, non_blocking=True) if history is not None else None
+            if args.corrector_type == "temporal":
+                if history.numel() == 0:
+                    raise ValueError(
+                        "Temporal corrector requires 'history_feats' in the dataset; received empty history."
+                    )
+                mismatch_history = history.to(device, non_blocking=True)
+            else:
+                mismatch_history = None
             optim.zero_grad()
-            a_corr = corrector(z_real, z_pred, a_plan, mismatch_history=history)
+            a_corr = corrector(z_real, z_pred, a_plan, mismatch_history=mismatch_history)
             loss = corrector_loss(a_corr, a_teacher, a_plan, reg_lambda=args.reg_lambda)
             loss.backward()
             optim.step()
