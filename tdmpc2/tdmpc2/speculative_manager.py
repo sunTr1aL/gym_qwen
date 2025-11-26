@@ -180,8 +180,9 @@ class SpeculativeManager:
                         # Keep the top-k candidates by predicted cumulative reward.
                         if not candidates:
                                 break
-                        rewards = torch.stack([c.cumulative_reward for c in candidates])
-                        topk = torch.topk(rewards.squeeze(-1), k=min(self.beam_width, len(candidates))).indices
+                        rewards = torch.stack([c.cumulative_reward for c in candidates]).view(-1)
+                        k = min(self.beam_width, len(candidates))
+                        topk = torch.topk(rewards, k=k).indices
                         beam = [candidates[i] for i in topk.tolist()]
 
                 return beam
