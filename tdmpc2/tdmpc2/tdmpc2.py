@@ -83,7 +83,9 @@ class TDMPC2(torch.nn.Module):
         print('Discount factor:', self.discount)
         prev_mean_horizon = max(self.cfg.horizon, self.spec_exec_horizon, self.spec_plan_horizon)
         self.register_buffer(
-            "_prev_mean", torch.zeros(prev_mean_horizon, self.cfg.action_dim)
+            "_prev_mean",
+            torch.zeros(prev_mean_horizon, self.cfg.action_dim, device=self.device),
+            persistent=True,
         )
         if cfg.compile:
             print('Compiling update function with torch.compile...')
