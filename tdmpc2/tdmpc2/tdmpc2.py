@@ -82,7 +82,11 @@ class TDMPC2(torch.nn.Module):
         print('Episode length:', cfg.episode_length)
         print('Discount factor:', self.discount)
         prev_mean_horizon = max(self.cfg.horizon, self.spec_exec_horizon, self.spec_plan_horizon)
-        self._prev_mean = torch.nn.Buffer(torch.zeros(prev_mean_horizon, self.cfg.action_dim, device=self.device))
+        self.register_buffer(
+            "_prev_mean",
+            torch.zeros(prev_mean_horizon, self.cfg.action_dim, device=self.device),
+            persistent=True,
+        )
         if cfg.compile:
             print('Compiling update function with torch.compile...')
             self._update = torch.compile(self._update, mode="reduce-overhead")

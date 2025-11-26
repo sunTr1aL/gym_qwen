@@ -13,6 +13,7 @@ features allow the temporal transformer corrector to reason over recent mismatch
 import argparse
 import os
 import sys
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,7 @@ from common.parser import parse_cfg  # noqa: E402
 from common.seed import set_seed  # noqa: E402
 from envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
+from tdmpc2.launch import launch, wrap_dataparallel
 
 
 def default_config_path() -> Path:
@@ -113,40 +115,40 @@ def pad_history(history: deque, target_len: int, feat_dim: int) -> torch.Tensor:
     return torch.stack(padded, dim=0)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained TD-MPC2 checkpoint")
-    parser.add_argument("--episodes", type=int, default=50, help="Number of episodes to collect")
-    parser.add_argument("--max_steps", type=int, default=None, help="Max steps per episode")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output", type=str, default="data/corrector_data.pt", help="Path to save dataset")
-    parser.add_argument("--min_distance", type=float, default=0.0, help="Minimum latent distance to record")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum number of samples to collect")
-    parser.add_argument("--seed", type=int, default=1, help="Random seed")
-    parser.add_argument("--config", type=str, default=None, help="Optional path to config.yaml override")
-    parser.add_argument("--history_len", type=int, default=4, help="History length for temporal features")
-    parser.add_argument("--plan_horizon", type=int, default=3, help="Teacher planning horizon")
-    parser.add_argument("--teacher_interval", type=int, default=1, help="Collect teacher action every N steps")
-    args = parser.parse_args()
+def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    del world_size  # unused; collection runs in a single process
 
     set_seed(args.seed)
+    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
+    device = torch.device("cuda" if use_gpu else "cpu")
+
     cfg = build_cfg(args)
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available. Set --device cpu to collect on CPU.")
+
+    if torch.cuda.is_available():
+        cfg.device = str(device)
 
     env = make_env(cfg)
     agent = TDMPC2(cfg)
     agent.load(args.checkpoint)
     agent.eval()
 
+    if use_gpu and torch.cuda.device_count() > 1:
+        agent.model = wrap_dataparallel(agent.model)
+
     buffer = CorrectorDataset()
     max_samples = args.max_samples if args.max_samples and args.max_samples > 0 else None
     history = deque(maxlen=args.history_len)
     feat_dim = 3 * cfg.latent_dim + cfg.action_dim
+    task = getattr(env, "task", None) if hasattr(env, "task") else None
+    if task is None:
+        task = getattr(cfg, "task", None)
 
     print(f"Collecting corrector data for task {cfg.task} on device {cfg.device}...")
     episodes = 0
+    start_time = time.time()
+    total_steps = 0
     try:
         while episodes < args.episodes and (max_samples is None or len(buffer) < max_samples):
             obs, done, ep_steps = env.reset(), False, 0
@@ -154,14 +156,14 @@ def main() -> None:
             while not done and (args.max_steps is None or ep_steps < args.max_steps):
                 obs_tensor = torch.as_tensor(obs, device=agent.device, dtype=torch.float32)
                 actions_seq, latents_seq = agent.plan_with_predicted_latents(
-                    obs_tensor, horizon=args.plan_horizon, eval_mode=True
+                    obs_tensor, task=task, horizon=args.plan_horizon, eval_mode=True
                 )
                 action = actions_seq[0].detach().cpu().numpy()
                 next_obs, reward, done, _ = env.step(action)
 
                 z_pred_next = latents_seq[1]
                 next_obs_tensor = torch.as_tensor(next_obs, device=agent.device, dtype=torch.float32)
-                z_real_next = agent.model.encode(next_obs_tensor.unsqueeze(0))
+                z_real_next = agent.model.encode(next_obs_tensor.unsqueeze(0), task)
                 a_plan_next = actions_seq[1] if actions_seq.shape[0] > 1 else actions_seq[0]
                 distance = torch.norm(z_real_next.squeeze(0) - z_pred_next).item()
 
@@ -177,7 +179,7 @@ def main() -> None:
                 history.append(feat)
 
                 if ep_steps % args.teacher_interval == 0 and distance >= args.min_distance:
-                    a_teacher = agent.plan_from_observation(next_obs_tensor, eval_mode=True)
+                    a_teacher = agent.plan_from_observation(next_obs_tensor, task=task, eval_mode=True)
                     history_feats = pad_history(history, args.history_len, feat_dim)
                     buffer.add(
                         z_real_next.squeeze(0),
@@ -189,6 +191,7 @@ def main() -> None:
                     )
                 obs = next_obs
                 ep_steps += 1
+                total_steps += 1
                 if max_samples is not None and len(buffer) >= max_samples:
                     break
             episodes += 1
@@ -204,8 +207,31 @@ def main() -> None:
     os.makedirs(output_dir, exist_ok=True)
     data = buffer.to_tensor_dict(device="cpu")
     torch.save(data, args.output)
-    print(f"Saved {len(buffer)} samples to {args.output}")
+    elapsed = time.time() - start_time
+    steps_per_sec = total_steps / max(elapsed, 1e-6)
+    print(f"Saved {len(buffer)} samples to {args.output} ({steps_per_sec:.1f} env steps/sec)")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained TD-MPC2 checkpoint")
+    parser.add_argument("--episodes", type=int, default=50, help="Number of episodes to collect")
+    parser.add_argument("--max_steps", type=int, default=None, help="Max steps per episode")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--output", type=str, default="data/corrector_data.pt", help="Path to save dataset")
+    parser.add_argument("--min_distance", type=float, default=0.0, help="Minimum latent distance to record")
+    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum number of samples to collect")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed")
+    parser.add_argument("--config", type=str, default=None, help="Optional path to config.yaml override")
+    parser.add_argument("--history_len", type=int, default=4, help="History length for temporal features")
+    parser.add_argument("--plan_horizon", type=int, default=3, help="Teacher planning horizon")
+    parser.add_argument("--teacher_interval", type=int, default=1, help="Collect teacher action every N steps")
+    parser.add_argument(
+        "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    launch(parse_args(), main_worker, use_ddp=False, allow_dataparallel=True)

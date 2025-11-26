@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -19,6 +20,7 @@ from common.parser import parse_cfg  # noqa: E402
 from common.seed import set_seed  # noqa: E402
 from envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
+from tdmpc2.launch import launch, wrap_dataparallel
 
 
 def build_cfg(args: argparse.Namespace) -> Any:
@@ -45,6 +47,8 @@ def run_rollout(agent: TDMPC2, env, episodes: int, max_steps: int) -> Dict[str, 
     returns: List[float] = []
     lengths: List[int] = []
     replan_counts: List[int] = []
+    total_steps = 0
+    start = time.time()
     for ep in range(episodes):
         obs, done, ep_steps = env.reset(), False, 0
         ep_return = 0.0
@@ -57,12 +61,16 @@ def run_rollout(agent: TDMPC2, env, episodes: int, max_steps: int) -> Dict[str, 
             obs = next_obs
             ep_return += float(reward)
             ep_steps += 1
+            total_steps += 1
             if getattr(agent, "steps_until_replan", 0) == agent.spec_exec_horizon:
                 replan_counter += 1
         returns.append(ep_return)
         lengths.append(ep_steps)
         replan_counts.append(replan_counter)
         print(f"Episode {ep+1}: return={ep_return:.2f}, steps={ep_steps}")
+    elapsed = time.time() - start
+    steps_per_sec = total_steps / max(elapsed, 1e-6)
+    print(f"[throughput] {steps_per_sec:.1f} env steps/sec across {episodes} episodes")
     return {"returns": returns, "lengths": lengths, "replans": replan_counts}
 
 
@@ -79,7 +87,38 @@ def summarize(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     }
 
 
-def main() -> None:
+def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    del world_size  # evaluation runs in a single process
+
+    set_seed(args.seed)
+    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
+    device = torch.device("cuda" if use_gpu else "cpu")
+
+    cfg = build_cfg(args)
+    if use_gpu:
+        cfg.device = str(device)
+    env = make_env(cfg)
+    agent = TDMPC2(cfg)
+    agent.load(args.tdmpc_checkpoint)
+    agent.eval()
+
+    if use_gpu and torch.cuda.device_count() > 1:
+        agent.model = wrap_dataparallel(agent.model)
+        if getattr(agent, "corrector", None) is not None:
+            agent.corrector = wrap_dataparallel(agent.corrector)
+
+    metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
+    summary = summarize(metrics)
+    print("Summary:", summary)
+    if args.output_metrics_path:
+        out_dir = os.path.dirname(args.output_metrics_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.output_metrics_path, "w", encoding="utf-8") as f:
+            json.dump({"metrics": metrics, "summary": summary}, f, indent=2)
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
     parser.add_argument("--tdmpc_checkpoint", type=str, required=True, help="Path to TD-MPC2 checkpoint")
@@ -95,25 +134,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--output_metrics_path", type=str, default=None)
-    args = parser.parse_args()
-
-    set_seed(args.seed)
-    cfg = build_cfg(args)
-    env = make_env(cfg)
-    agent = TDMPC2(cfg)
-    agent.load(args.tdmpc_checkpoint)
-    agent.eval()
-
-    metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
-    summary = summarize(metrics)
-    print("Summary:", summary)
-    if args.output_metrics_path:
-        out_dir = os.path.dirname(args.output_metrics_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        with open(args.output_metrics_path, "w", encoding="utf-8") as f:
-            json.dump({"metrics": metrics, "summary": summary}, f, indent=2)
+    parser.add_argument(
+        "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    launch(parse_args(), main_worker, use_ddp=False, allow_dataparallel=True)
