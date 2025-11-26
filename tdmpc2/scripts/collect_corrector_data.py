@@ -16,24 +16,9 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
-
-def _configure_gpus_from_argv() -> str:
-    """Parse --gpus early and set CUDA visibility before importing torch."""
-
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--gpus", type=str, default="all")
-    args, _ = parser.parse_known_args()
-    if args.gpus and args.gpus != "all":
-        visible = args.gpus if not args.gpus.isdigit() else ",".join(str(i) for i in range(int(args.gpus)))
-        os.environ["CUDA_VISIBLE_DEVICES"] = visible
-    return args.gpus
-
-
-_EARLY_GPUS = _configure_gpus_from_argv()
-
-import torch  # noqa: E402
+import torch
 from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +29,7 @@ from common.parser import parse_cfg  # noqa: E402
 from common.seed import set_seed  # noqa: E402
 from envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
+from tdmpc2.launch import launch, wrap_dataparallel
 
 
 def default_config_path() -> Path:
@@ -102,26 +88,6 @@ class CorrectorDataset:
         }
 
 
-def _resolve_device_ids(gpus: str) -> Sequence[int]:
-    if not torch.cuda.is_available():
-        return []
-    if gpus in (None, "all"):
-        return list(range(torch.cuda.device_count()))
-    if gpus.isdigit():
-        requested = int(gpus)
-        if requested <= 0:
-            return []
-        if requested > torch.cuda.device_count():
-            raise ValueError(f"Requested {requested} GPUs but only {torch.cuda.device_count()} available")
-        return list(range(requested))
-    cleaned = [int(g.strip()) for g in gpus.split(",") if g.strip()]
-    if not cleaned:
-        return []
-    if max(cleaned) >= torch.cuda.device_count():
-        raise ValueError(f"GPU ids {cleaned} exceed available {torch.cuda.device_count()}")
-    return cleaned
-
-
 def build_cfg(args: argparse.Namespace) -> Any:
     cfg_path = Path(args.config) if args.config else default_config_path()
     cfg = OmegaConf.load(cfg_path)
@@ -149,45 +115,27 @@ def pad_history(history: deque, target_len: int, feat_dim: int) -> torch.Tensor:
     return torch.stack(padded, dim=0)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained TD-MPC2 checkpoint")
-    parser.add_argument("--episodes", type=int, default=50, help="Number of episodes to collect")
-    parser.add_argument("--max_steps", type=int, default=None, help="Max steps per episode")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output", type=str, default="data/corrector_data.pt", help="Path to save dataset")
-    parser.add_argument("--min_distance", type=float, default=0.0, help="Minimum latent distance to record")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum number of samples to collect")
-    parser.add_argument("--seed", type=int, default=1, help="Random seed")
-    parser.add_argument("--config", type=str, default=None, help="Optional path to config.yaml override")
-    parser.add_argument("--history_len", type=int, default=4, help="History length for temporal features")
-    parser.add_argument("--plan_horizon", type=int, default=3, help="Teacher planning horizon")
-    parser.add_argument("--teacher_interval", type=int, default=1, help="Collect teacher action every N steps")
-    parser.add_argument("--gpus", type=str, default=_EARLY_GPUS or "all", help="GPU selection: all, N, or comma list")
-    args = parser.parse_args()
+def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    del world_size  # unused; collection runs in a single process
 
     set_seed(args.seed)
-    device_ids = [] if args.device.startswith("cpu") else _resolve_device_ids(args.gpus)
-    requested = args.gpus if args.gpus is not None else "all"
-    print(
-        f"[GPU CONFIG] Requested: {requested}; visible devices: {torch.cuda.device_count()} | "
-        f"selected ids: {device_ids}"
-    )
+    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
+    device = torch.device("cuda" if use_gpu else "cpu")
+
     cfg = build_cfg(args)
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available. Set --device cpu to collect on CPU.")
 
-    if device_ids:
-        cfg.device = f"cuda:{device_ids[0]}"
+    if torch.cuda.is_available():
+        cfg.device = str(device)
 
     env = make_env(cfg)
     agent = TDMPC2(cfg)
     agent.load(args.checkpoint)
     agent.eval()
 
-    if len(device_ids) > 1 and torch.cuda.is_available():
-        agent.model = torch.nn.DataParallel(agent.model)
+    if use_gpu and torch.cuda.device_count() > 1:
+        agent.model = wrap_dataparallel(agent.model)
 
     buffer = CorrectorDataset()
     max_samples = args.max_samples if args.max_samples and args.max_samples > 0 else None
@@ -261,5 +209,26 @@ def main() -> None:
     print(f"Saved {len(buffer)} samples to {args.output} ({steps_per_sec:.1f} env steps/sec)")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained TD-MPC2 checkpoint")
+    parser.add_argument("--episodes", type=int, default=50, help="Number of episodes to collect")
+    parser.add_argument("--max_steps", type=int, default=None, help="Max steps per episode")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--output", type=str, default="data/corrector_data.pt", help="Path to save dataset")
+    parser.add_argument("--min_distance", type=float, default=0.0, help="Minimum latent distance to record")
+    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum number of samples to collect")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed")
+    parser.add_argument("--config", type=str, default=None, help="Optional path to config.yaml override")
+    parser.add_argument("--history_len", type=int, default=4, help="History length for temporal features")
+    parser.add_argument("--plan_horizon", type=int, default=3, help="Teacher planning horizon")
+    parser.add_argument("--teacher_interval", type=int, default=1, help="Collect teacher action every N steps")
+    parser.add_argument(
+        "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    launch(parse_args(), main_worker, use_ddp=False, allow_dataparallel=True)

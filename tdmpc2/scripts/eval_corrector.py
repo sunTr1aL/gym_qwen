@@ -7,24 +7,9 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List
 
-
-def _configure_gpus_from_argv() -> str:
-    """Parse --gpus early and set CUDA visibility before importing torch."""
-
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--gpus", type=str, default="all")
-    args, _ = parser.parse_known_args()
-    if args.gpus and args.gpus != "all":
-        visible = args.gpus if not args.gpus.isdigit() else ",".join(str(i) for i in range(int(args.gpus)))
-        os.environ["CUDA_VISIBLE_DEVICES"] = visible
-    return args.gpus
-
-
-_EARLY_GPUS = _configure_gpus_from_argv()
-
-import torch  # noqa: E402
+import torch
 from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +20,7 @@ from common.parser import parse_cfg  # noqa: E402
 from common.seed import set_seed  # noqa: E402
 from envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
+from tdmpc2.launch import launch, wrap_dataparallel
 
 
 def build_cfg(args: argparse.Namespace) -> Any:
@@ -55,26 +41,6 @@ def build_cfg(args: argparse.Namespace) -> Any:
     cfg.speculate = False
     cfg = parse_cfg(cfg)
     return cfg
-
-
-def _resolve_device_ids(gpus: str) -> Sequence[int]:
-    if not torch.cuda.is_available():
-        return []
-    if gpus in (None, "all"):
-        return list(range(torch.cuda.device_count()))
-    if gpus.isdigit():
-        requested = int(gpus)
-        if requested <= 0:
-            return []
-        if requested > torch.cuda.device_count():
-            raise ValueError(f"Requested {requested} GPUs but only {torch.cuda.device_count()} available")
-        return list(range(requested))
-    cleaned = [int(g.strip()) for g in gpus.split(",") if g.strip()]
-    if not cleaned:
-        return []
-    if max(cleaned) >= torch.cuda.device_count():
-        raise ValueError(f"GPU ids {cleaned} exceed available {torch.cuda.device_count()}")
-    return cleaned
 
 
 def run_rollout(agent: TDMPC2, env, episodes: int, max_steps: int) -> Dict[str, List[float]]:
@@ -121,7 +87,36 @@ def summarize(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     }
 
 
-def main() -> None:
+def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    del world_size  # evaluation runs in a single process
+
+    set_seed(args.seed)
+    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
+    device = torch.device("cuda" if use_gpu else "cpu")
+
+    cfg = build_cfg(args)
+    if use_gpu:
+        cfg.device = str(device)
+    env = make_env(cfg)
+    agent = TDMPC2(cfg)
+    agent.load(args.tdmpc_checkpoint)
+    agent.eval()
+
+    if use_gpu and torch.cuda.device_count() > 1:
+        agent.model = wrap_dataparallel(agent.model)
+        if getattr(agent, "corrector", None) is not None:
+            agent.corrector = wrap_dataparallel(agent.corrector)
+
+    metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
+    summary = summarize(metrics)
+    print("Summary:", summary)
+    if args.output_metrics_path:
+        os.makedirs(os.path.dirname(args.output_metrics_path), exist_ok=True)
+        with open(args.output_metrics_path, "w", encoding="utf-8") as f:
+            json.dump({"metrics": metrics, "summary": summary}, f, indent=2)
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
     parser.add_argument("--tdmpc_checkpoint", type=str, required=True, help="Path to TD-MPC2 checkpoint")
@@ -137,37 +132,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--output_metrics_path", type=str, default=None)
-    parser.add_argument("--gpus", type=str, default=_EARLY_GPUS or "all", help="GPU selection: all, N, or comma list")
-    args = parser.parse_args()
-
-    set_seed(args.seed)
-    device_ids = [] if args.device.startswith("cpu") else _resolve_device_ids(args.gpus)
-    requested = args.gpus if args.gpus is not None else "all"
-    print(
-        f"[GPU CONFIG] Requested: {requested}; visible devices: {torch.cuda.device_count()} | "
-        f"selected ids: {device_ids}"
+    parser.add_argument(
+        "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
     )
-    cfg = build_cfg(args)
-    if device_ids:
-        cfg.device = f"cuda:{device_ids[0]}"
-    env = make_env(cfg)
-    agent = TDMPC2(cfg)
-    agent.load(args.tdmpc_checkpoint)
-    agent.eval()
-
-    if len(device_ids) > 1 and torch.cuda.is_available():
-        agent.model = torch.nn.DataParallel(agent.model)
-        if getattr(agent, "corrector", None) is not None:
-            agent.corrector = torch.nn.DataParallel(agent.corrector)
-
-    metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
-    summary = summarize(metrics)
-    print("Summary:", summary)
-    if args.output_metrics_path:
-        os.makedirs(os.path.dirname(args.output_metrics_path), exist_ok=True)
-        with open(args.output_metrics_path, "w", encoding="utf-8") as f:
-            json.dump({"metrics": metrics, "summary": summary}, f, indent=2)
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    launch(parse_args(), main_worker, use_ddp=False, allow_dataparallel=True)

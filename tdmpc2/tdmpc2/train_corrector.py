@@ -1,31 +1,14 @@
 import argparse
-import os
 import time
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List
 
-
-def _configure_gpus_from_argv() -> str:
-    """Parse --gpus early and set CUDA_VISIBLE_DEVICES before importing torch."""
-
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--gpus", type=str, default="all")
-    args, _ = parser.parse_known_args()
-    gpus_arg = args.gpus
-    if gpus_arg and gpus_arg != "all":
-        visible = gpus_arg if not gpus_arg.isdigit() else ",".join(str(i) for i in range(int(gpus_arg)))
-        os.environ["CUDA_VISIBLE_DEVICES"] = visible
-    return gpus_arg
-
-
-_EARLY_GPUS = _configure_gpus_from_argv()
-
-import torch  # noqa: E402
+import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 from tdmpc2.corrector import build_corrector_from_cfg, corrector_loss
-from tdmpc2.distributed import cleanup_ddp, ddp_available, setup_ddp
+from tdmpc2.launch import cleanup_ddp, ddp_available, launch, setup_ddp, wrap_dataparallel
 
 
 class CorrectorDataset(Dataset):
@@ -65,32 +48,14 @@ def maybe_concat(paths: List[Path], device: torch.device) -> Dict[str, torch.Ten
     return {k: torch.cat([t[k] for t in tensors], dim=0) for k in keys}
 
 
-def _resolve_device_ids(gpus: str) -> Sequence[int]:
-    if not torch.cuda.is_available():
-        return []
-    if gpus in (None, "all"):
-        return list(range(torch.cuda.device_count()))
-    if gpus.isdigit():
-        requested = int(gpus)
-        if requested <= 0:
-            return []
-        if requested > torch.cuda.device_count():
-            raise ValueError(f"Requested {requested} GPUs but only {torch.cuda.device_count()} available")
-        return list(range(requested))
-    cleaned = [int(g.strip()) for g in gpus.split(",") if g.strip()]
-    if not cleaned:
-        return []
-    if max(cleaned) >= torch.cuda.device_count():
-        raise ValueError(f"GPU ids {cleaned} exceed available {torch.cuda.device_count()}")
-    return cleaned
-
-
-def train_worker(rank: int, world_size: int, args: argparse.Namespace, device_ids: Sequence[int]) -> None:
-    use_ddp = ddp_available(world_size)
-    if use_ddp:
+def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
+    use_ddp = world_size > 1 and ddp_available(world_size) and use_gpu
+    device = (
         setup_ddp(rank, world_size)
-
-    device = torch.device("cuda", rank) if torch.cuda.is_available() and device_ids else torch.device("cpu")
+        if use_ddp
+        else torch.device("cuda" if use_gpu else "cpu")
+    )
 
     data_path = Path(args.data)
     if data_path.is_dir():
@@ -131,8 +96,11 @@ def train_worker(rank: int, world_size: int, args: argparse.Namespace, device_id
         corrector = torch.nn.parallel.DistributedDataParallel(
             corrector, device_ids=[rank], output_device=rank, find_unused_parameters=False
         )
-    elif world_size > 1 and len(device_ids) > 1:
-        corrector = torch.nn.DataParallel(corrector)
+    elif torch.cuda.is_available():
+        # DataParallel fallback when multiple visible GPUs but DDP disabled.
+        dp_ids = list(range(torch.cuda.device_count()))
+        if len(dp_ids) > 1:
+            corrector = wrap_dataparallel(corrector, device_ids=dp_ids)
 
     optim = torch.optim.Adam(corrector.parameters(), lr=args.lr)
 
@@ -194,28 +162,14 @@ def main() -> None:
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--history_len", type=int, default=4)
-    parser.add_argument("--gpus", type=str, default=_EARLY_GPUS or "all", help="GPU selection: all, N, or comma list")
+    parser.add_argument(
+        "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
+    )
     args = parser.parse_args()
 
-    device_ids = [] if args.device.startswith("cpu") else _resolve_device_ids(args.gpus)
-    requested = args.gpus if args.gpus is not None else "all"
-    print(
-        f"[GPU CONFIG] Requested: {requested}; visible devices: {torch.cuda.device_count()} | "
-        f"selected ids: {device_ids}"
-    )
+    launch(args, train_worker, use_ddp=True, allow_dataparallel=True)
 
-    world_size = len(device_ids) if device_ids else 1
-    if world_size > 1 and not ddp_available(world_size):
-        print("WARNING: DDP requested but unavailable. Falling back to DataParallel if possible.")
-    env_world_size = int(os.environ.get("WORLD_SIZE", world_size))
 
-    if env_world_size > 1:
-        # Launched via torchrun
-        train_worker(int(os.environ.get("LOCAL_RANK", 0)), env_world_size, args, device_ids)
-    elif world_size > 1:
-        torch.multiprocessing.spawn(train_worker, args=(world_size, args, device_ids), nprocs=world_size, join=True)
-    else:
-        train_worker(0, 1, args, device_ids)
 
 
 if __name__ == "__main__":
