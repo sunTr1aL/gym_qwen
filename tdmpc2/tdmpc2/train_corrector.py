@@ -46,6 +46,21 @@ def _select_action_tensor(state: Dict[str, torch.Tensor]) -> torch.Tensor:
     raise ValueError("Missing action key in buffer: expected 'a_plan' or 'a_spec'.")
 
 
+def _to_tensor(value, device: torch.device) -> torch.Tensor:
+    """Convert mixed list/scalar entries from saved buffers into tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, list):
+        if len(value) == 0:
+            return torch.empty(0, device=device)
+        first = value[0]
+        if isinstance(first, torch.Tensor):
+            return torch.stack(value).to(device)
+        return torch.as_tensor(value, device=device)
+    return torch.as_tensor(value, device=device)
+
+
 def load_tensor_dict(path: Path, device: torch.device) -> Dict[str, torch.Tensor]:
     state = torch.load(path, map_location=device)
     if isinstance(state, list):
@@ -58,10 +73,8 @@ def load_tensor_dict(path: Path, device: torch.device) -> Dict[str, torch.Tensor
 
     action_tensor = _select_action_tensor(state)
 
-    processed = {k: (torch.stack(v) if isinstance(v, list) else v).to(device) for k, v in state.items()}
-    processed["a_plan"] = (torch.stack(action_tensor) if isinstance(action_tensor, list) else action_tensor).to(
-        device
-    )
+    processed = {k: _to_tensor(v, device) for k, v in state.items()}
+    processed["a_plan"] = _to_tensor(action_tensor, device)
     # Preserve optional a_spec for compatibility across mixed datasets.
     if "a_spec" not in processed:
         processed["a_spec"] = processed["a_plan"]
