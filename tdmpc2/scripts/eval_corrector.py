@@ -108,7 +108,9 @@ def main() -> None:
     summary = summarize(metrics)
     print("Summary:", summary)
     if args.output_metrics_path:
-        os.makedirs(os.path.dirname(args.output_metrics_path), exist_ok=True)
+        out_dir = os.path.dirname(args.output_metrics_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(args.output_metrics_path, "w", encoding="utf-8") as f:
             json.dump({"metrics": metrics, "summary": summary}, f, indent=2)
 
