@@ -13,11 +13,27 @@ features allow the temporal transformer corrector to reason over recent mismatch
 import argparse
 import os
 import sys
+import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
-import torch
+
+def _configure_gpus_from_argv() -> str:
+    """Parse --gpus early and set CUDA visibility before importing torch."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--gpus", type=str, default="all")
+    args, _ = parser.parse_known_args()
+    if args.gpus and args.gpus != "all":
+        visible = args.gpus if not args.gpus.isdigit() else ",".join(str(i) for i in range(int(args.gpus)))
+        os.environ["CUDA_VISIBLE_DEVICES"] = visible
+    return args.gpus
+
+
+_EARLY_GPUS = _configure_gpus_from_argv()
+
+import torch  # noqa: E402
 from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +102,26 @@ class CorrectorDataset:
         }
 
 
+def _resolve_device_ids(gpus: str) -> Sequence[int]:
+    if not torch.cuda.is_available():
+        return []
+    if gpus in (None, "all"):
+        return list(range(torch.cuda.device_count()))
+    if gpus.isdigit():
+        requested = int(gpus)
+        if requested <= 0:
+            return []
+        if requested > torch.cuda.device_count():
+            raise ValueError(f"Requested {requested} GPUs but only {torch.cuda.device_count()} available")
+        return list(range(requested))
+    cleaned = [int(g.strip()) for g in gpus.split(",") if g.strip()]
+    if not cleaned:
+        return []
+    if max(cleaned) >= torch.cuda.device_count():
+        raise ValueError(f"GPU ids {cleaned} exceed available {torch.cuda.device_count()}")
+    return cleaned
+
+
 def build_cfg(args: argparse.Namespace) -> Any:
     cfg_path = Path(args.config) if args.config else default_config_path()
     cfg = OmegaConf.load(cfg_path)
@@ -128,17 +164,30 @@ def main() -> None:
     parser.add_argument("--history_len", type=int, default=4, help="History length for temporal features")
     parser.add_argument("--plan_horizon", type=int, default=3, help="Teacher planning horizon")
     parser.add_argument("--teacher_interval", type=int, default=1, help="Collect teacher action every N steps")
+    parser.add_argument("--gpus", type=str, default=_EARLY_GPUS or "all", help="GPU selection: all, N, or comma list")
     args = parser.parse_args()
 
     set_seed(args.seed)
+    device_ids = [] if args.device.startswith("cpu") else _resolve_device_ids(args.gpus)
+    requested = args.gpus if args.gpus is not None else "all"
+    print(
+        f"[GPU CONFIG] Requested: {requested}; visible devices: {torch.cuda.device_count()} | "
+        f"selected ids: {device_ids}"
+    )
     cfg = build_cfg(args)
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available. Set --device cpu to collect on CPU.")
+
+    if device_ids:
+        cfg.device = f"cuda:{device_ids[0]}"
 
     env = make_env(cfg)
     agent = TDMPC2(cfg)
     agent.load(args.checkpoint)
     agent.eval()
+
+    if len(device_ids) > 1 and torch.cuda.is_available():
+        agent.model = torch.nn.DataParallel(agent.model)
 
     buffer = CorrectorDataset()
     max_samples = args.max_samples if args.max_samples and args.max_samples > 0 else None
@@ -147,6 +196,8 @@ def main() -> None:
 
     print(f"Collecting corrector data for task {cfg.task} on device {cfg.device}...")
     episodes = 0
+    start_time = time.time()
+    total_steps = 0
     try:
         while episodes < args.episodes and (max_samples is None or len(buffer) < max_samples):
             obs, done, ep_steps = env.reset(), False, 0
@@ -189,6 +240,7 @@ def main() -> None:
                     )
                 obs = next_obs
                 ep_steps += 1
+                total_steps += 1
                 if max_samples is not None and len(buffer) >= max_samples:
                     break
             episodes += 1
@@ -204,7 +256,9 @@ def main() -> None:
     os.makedirs(output_dir, exist_ok=True)
     data = buffer.to_tensor_dict(device="cpu")
     torch.save(data, args.output)
-    print(f"Saved {len(buffer)} samples to {args.output}")
+    elapsed = time.time() - start_time
+    steps_per_sec = total_steps / max(elapsed, 1e-6)
+    print(f"Saved {len(buffer)} samples to {args.output} ({steps_per_sec:.1f} env steps/sec)")
 
 
 if __name__ == "__main__":

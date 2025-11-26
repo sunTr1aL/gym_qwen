@@ -5,10 +5,26 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
-import torch
+
+def _configure_gpus_from_argv() -> str:
+    """Parse --gpus early and set CUDA visibility before importing torch."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--gpus", type=str, default="all")
+    args, _ = parser.parse_known_args()
+    if args.gpus and args.gpus != "all":
+        visible = args.gpus if not args.gpus.isdigit() else ",".join(str(i) for i in range(int(args.gpus)))
+        os.environ["CUDA_VISIBLE_DEVICES"] = visible
+    return args.gpus
+
+
+_EARLY_GPUS = _configure_gpus_from_argv()
+
+import torch  # noqa: E402
 from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,10 +57,32 @@ def build_cfg(args: argparse.Namespace) -> Any:
     return cfg
 
 
+def _resolve_device_ids(gpus: str) -> Sequence[int]:
+    if not torch.cuda.is_available():
+        return []
+    if gpus in (None, "all"):
+        return list(range(torch.cuda.device_count()))
+    if gpus.isdigit():
+        requested = int(gpus)
+        if requested <= 0:
+            return []
+        if requested > torch.cuda.device_count():
+            raise ValueError(f"Requested {requested} GPUs but only {torch.cuda.device_count()} available")
+        return list(range(requested))
+    cleaned = [int(g.strip()) for g in gpus.split(",") if g.strip()]
+    if not cleaned:
+        return []
+    if max(cleaned) >= torch.cuda.device_count():
+        raise ValueError(f"GPU ids {cleaned} exceed available {torch.cuda.device_count()}")
+    return cleaned
+
+
 def run_rollout(agent: TDMPC2, env, episodes: int, max_steps: int) -> Dict[str, List[float]]:
     returns: List[float] = []
     lengths: List[int] = []
     replan_counts: List[int] = []
+    total_steps = 0
+    start = time.time()
     for ep in range(episodes):
         obs, done, ep_steps = env.reset(), False, 0
         ep_return = 0.0
@@ -57,12 +95,16 @@ def run_rollout(agent: TDMPC2, env, episodes: int, max_steps: int) -> Dict[str, 
             obs = next_obs
             ep_return += float(reward)
             ep_steps += 1
+            total_steps += 1
             if getattr(agent, "steps_until_replan", 0) == agent.spec_exec_horizon:
                 replan_counter += 1
         returns.append(ep_return)
         lengths.append(ep_steps)
         replan_counts.append(replan_counter)
         print(f"Episode {ep+1}: return={ep_return:.2f}, steps={ep_steps}")
+    elapsed = time.time() - start
+    steps_per_sec = total_steps / max(elapsed, 1e-6)
+    print(f"[throughput] {steps_per_sec:.1f} env steps/sec across {episodes} episodes")
     return {"returns": returns, "lengths": lengths, "replans": replan_counts}
 
 
@@ -95,14 +137,28 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--output_metrics_path", type=str, default=None)
+    parser.add_argument("--gpus", type=str, default=_EARLY_GPUS or "all", help="GPU selection: all, N, or comma list")
     args = parser.parse_args()
 
     set_seed(args.seed)
+    device_ids = [] if args.device.startswith("cpu") else _resolve_device_ids(args.gpus)
+    requested = args.gpus if args.gpus is not None else "all"
+    print(
+        f"[GPU CONFIG] Requested: {requested}; visible devices: {torch.cuda.device_count()} | "
+        f"selected ids: {device_ids}"
+    )
     cfg = build_cfg(args)
+    if device_ids:
+        cfg.device = f"cuda:{device_ids[0]}"
     env = make_env(cfg)
     agent = TDMPC2(cfg)
     agent.load(args.tdmpc_checkpoint)
     agent.eval()
+
+    if len(device_ids) > 1 and torch.cuda.is_available():
+        agent.model = torch.nn.DataParallel(agent.model)
+        if getattr(agent, "corrector", None) is not None:
+            agent.corrector = torch.nn.DataParallel(agent.corrector)
 
     metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
     summary = summarize(metrics)
