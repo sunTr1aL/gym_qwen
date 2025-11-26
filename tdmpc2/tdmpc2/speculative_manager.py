@@ -125,6 +125,8 @@ class SpeculativeManager:
                         "accepted": accepted,
                         "distance": min_distance,
                         "task": task,
+                        "z_pred": best_branch.z_sequence[0],
+                        "branch": best_branch,
                 }
 
                 # Clear pending speculation regardless of match quality.
