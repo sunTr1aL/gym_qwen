@@ -141,6 +141,9 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     max_samples = args.max_samples if args.max_samples and args.max_samples > 0 else None
     history = deque(maxlen=args.history_len)
     feat_dim = 3 * cfg.latent_dim + cfg.action_dim
+    task = getattr(env, "task", None) if hasattr(env, "task") else None
+    if task is None:
+        task = getattr(cfg, "task", None)
 
     print(f"Collecting corrector data for task {cfg.task} on device {cfg.device}...")
     episodes = 0
@@ -153,14 +156,14 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             while not done and (args.max_steps is None or ep_steps < args.max_steps):
                 obs_tensor = torch.as_tensor(obs, device=agent.device, dtype=torch.float32)
                 actions_seq, latents_seq = agent.plan_with_predicted_latents(
-                    obs_tensor, horizon=args.plan_horizon, eval_mode=True
+                    obs_tensor, task=task, horizon=args.plan_horizon, eval_mode=True
                 )
                 action = actions_seq[0].detach().cpu().numpy()
                 next_obs, reward, done, _ = env.step(action)
 
                 z_pred_next = latents_seq[1]
                 next_obs_tensor = torch.as_tensor(next_obs, device=agent.device, dtype=torch.float32)
-                z_real_next = agent.model.encode(next_obs_tensor.unsqueeze(0))
+                z_real_next = agent.model.encode(next_obs_tensor.unsqueeze(0), task)
                 a_plan_next = actions_seq[1] if actions_seq.shape[0] > 1 else actions_seq[0]
                 distance = torch.norm(z_real_next.squeeze(0) - z_pred_next).item()
 
@@ -176,7 +179,7 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
                 history.append(feat)
 
                 if ep_steps % args.teacher_interval == 0 and distance >= args.min_distance:
-                    a_teacher = agent.plan_from_observation(next_obs_tensor, eval_mode=True)
+                    a_teacher = agent.plan_from_observation(next_obs_tensor, task=task, eval_mode=True)
                     history_feats = pad_history(history, args.history_len, feat_dim)
                     buffer.add(
                         z_real_next.squeeze(0),

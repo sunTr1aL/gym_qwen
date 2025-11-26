@@ -19,25 +19,74 @@ class CorrectorDataset(Dataset):
         self.z_pred = data["z_pred"][mask]
         self.a_plan = data["a_plan"][mask]
         self.a_teacher = data["a_teacher"][mask]
-        self.history = data.get("history_feats")
+
+        hist = data.get("history_feats")
+        if hist is not None:
+            self.history = hist[mask].to(self.z_real.device)
+        else:
+            self.history = None
+        self.history_shape = self.history.shape[1:] if self.history is not None else None
+        # Placeholder used when no history is available to avoid None collation.
+        self.empty_history = torch.empty((0, 0), device=self.z_real.device, dtype=self.z_real.dtype)
 
     def __len__(self) -> int:
         return self.z_real.shape[0]
 
     def __getitem__(self, idx):
-        hist = self.history[idx] if self.history is not None else None
+        hist = self.history[idx] if self.history is not None else self.empty_history
         return self.z_real[idx], self.z_pred[idx], self.a_plan[idx], self.a_teacher[idx], hist
+
+
+_ACTION_FALLBACK_WARNED = False
+
+
+def _select_action_tensor(state: Dict[str, torch.Tensor]) -> torch.Tensor:
+    """Return the planned/speculative action tensor with legacy compatibility."""
+
+    global _ACTION_FALLBACK_WARNED
+    if "a_plan" in state:
+        return state["a_plan"]
+    if "a_spec" in state:
+        if not _ACTION_FALLBACK_WARNED:
+            print("WARNING: 'a_plan' missing in buffer, using 'a_spec' instead.")
+            _ACTION_FALLBACK_WARNED = True
+        return state["a_spec"]
+    raise ValueError("Missing action key in buffer: expected 'a_plan' or 'a_spec'.")
+
+
+def _to_tensor(value, device: torch.device) -> torch.Tensor:
+    """Convert mixed list/scalar entries from saved buffers into tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, list):
+        if len(value) == 0:
+            return torch.empty(0, device=device)
+        first = value[0]
+        if isinstance(first, torch.Tensor):
+            return torch.stack(value).to(device)
+        return torch.as_tensor(value, device=device)
+    return torch.as_tensor(value, device=device)
 
 
 def load_tensor_dict(path: Path, device: torch.device) -> Dict[str, torch.Tensor]:
     state = torch.load(path, map_location=device)
     if isinstance(state, list):
         raise ValueError("Expected a dict of tensors in the dataset file.")
-    required = {"z_real", "z_pred", "a_plan", "a_teacher"}
+
+    required = {"z_real", "z_pred", "a_teacher"}
     missing = required - set(state.keys())
     if missing:
         raise ValueError(f"Missing keys in buffer: {missing}")
-    return {k: (torch.stack(v) if isinstance(v, list) else v).to(device) for k, v in state.items()}
+
+    action_tensor = _select_action_tensor(state)
+
+    processed = {k: _to_tensor(v, device) for k, v in state.items()}
+    processed["a_plan"] = _to_tensor(action_tensor, device)
+    # Preserve optional a_spec for compatibility across mixed datasets.
+    if "a_spec" not in processed:
+        processed["a_spec"] = processed["a_plan"]
+    return processed
 
 
 def maybe_concat(paths: List[Path], device: torch.device) -> Dict[str, torch.Tensor]:
@@ -117,9 +166,16 @@ def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             z_pred = z_pred.to(device, non_blocking=True)
             a_plan = a_plan.to(device, non_blocking=True)
             a_teacher = a_teacher.to(device, non_blocking=True)
-            history = history.to(device, non_blocking=True) if history is not None else None
+            if args.corrector_type == "temporal":
+                if history.numel() == 0:
+                    raise ValueError(
+                        "Temporal corrector requires 'history_feats' in the dataset; received empty history."
+                    )
+                mismatch_history = history.to(device, non_blocking=True)
+            else:
+                mismatch_history = None
             optim.zero_grad()
-            a_corr = corrector(z_real, z_pred, a_plan, mismatch_history=history)
+            a_corr = corrector(z_real, z_pred, a_plan, mismatch_history=mismatch_history)
             loss = corrector_loss(a_corr, a_teacher, a_plan, reg_lambda=args.reg_lambda)
             loss.backward()
             optim.step()
