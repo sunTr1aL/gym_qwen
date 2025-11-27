@@ -320,6 +320,11 @@ def main() -> None:
     parser.add_argument(
         "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
     )
+    parser.add_argument(
+        "--exclude_pattern",
+        action="append",
+        help="Optional substring(s) to skip when discovering checkpoints",
+    )
     args = parser.parse_args()
 
     if args.all_model_sizes:
