@@ -27,8 +27,8 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_OUTPUT = "data/corrector_data.pt"
 
-from common.parser import parse_cfg  # noqa: E402
-from common.seed import set_seed  # noqa: E402
+from tdmpc2.common.parser import parse_cfg  # noqa: E402
+from tdmpc2.common.seed import set_seed  # noqa: E402
 from envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
 from tdmpc2.launch import launch, wrap_dataparallel
