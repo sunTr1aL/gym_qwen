@@ -6,7 +6,7 @@ from typing import Any
 import hydra
 from omegaconf import OmegaConf
 
-from common import MODEL_SIZE, TASK_SET
+from tdmpc2.common import MODEL_SIZE, TASK_SET
 
 
 def cfg_to_dataclass(cfg, frozen=False):

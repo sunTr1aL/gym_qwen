@@ -29,13 +29,13 @@ import torch.multiprocessing as mp
 import hydra
 from termcolor import colored
 
-from common.parser import parse_cfg
-from common.seed import set_seed
-from common.buffer import Buffer
-from envs import make_env
-from tdmpc2_ddp import TDMPC2_DDP
-from trainer.ddp_online_trainer import DDPOnlineTrainer
-from common.logger import Logger
+from tdmpc2.common.parser import parse_cfg
+from tdmpc2.common.seed import set_seed
+from tdmpc2.common.buffer import Buffer
+from tdmpc2.envs import make_env
+from tdmpc2.tdmpc2_ddp import TDMPC2_DDP
+from tdmpc2.trainer.ddp_online_trainer import DDPOnlineTrainer
+from tdmpc2.common.logger import Logger
 
 torch.backends.cudnn.benchmark = True
 torch.set_float32_matmul_precision('high')
@@ -103,12 +103,27 @@ def train_worker(rank, cfg):
 		print(colored('World size:', 'yellow', attrs=['bold']), cfg.world_size)
 		print(colored('Sync frequency:', 'yellow', attrs=['bold']), getattr(cfg, 'sync_freq', 1))
 
-	try:
-		# Create environment (each process has its own environment)
-		env = make_env(cfg)
+        try:
+                # Create environment (each process has its own environment)
+                env = make_env(cfg)
 
-		# Create agent with DDP wrapper
-		agent = TDMPC2_DDP(cfg)
+                # Ensure all ranks share identical environment-derived config
+                env_cfg = {
+                        "obs_shape": getattr(cfg, "obs_shape", None),
+                        "obs_shapes": getattr(cfg, "obs_shapes", None),
+                        "action_dim": getattr(cfg, "action_dim", None),
+                        "action_dims": getattr(cfg, "action_dims", None),
+                        "episode_length": getattr(cfg, "episode_length", None),
+                        "episode_lengths": getattr(cfg, "episode_lengths", None),
+                        "seed_steps": getattr(cfg, "seed_steps", None),
+                }
+                env_cfg_list = [env_cfg]
+                dist.broadcast_object_list(env_cfg_list, src=0)
+                for k, v in env_cfg_list[0].items():
+                        setattr(cfg, k, v)
+
+                # Create agent with DDP wrapper
+                agent = TDMPC2_DDP(cfg)
 
 		# Create buffer (each process has its own buffer)
 		buffer = Buffer(cfg)

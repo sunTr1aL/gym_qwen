@@ -3,10 +3,10 @@ import torch.nn.functional as F
 from collections import deque
 from typing import List, Optional, Tuple
 
-from common import math
-from common.scale import RunningScale
-from common.world_model import WorldModel
-from common.layers import api_model_conversion
+from tdmpc2.common import math
+from tdmpc2.common.scale import RunningScale
+from tdmpc2.common.world_model import WorldModel
+from tdmpc2.common.layers import api_model_conversion
 from tensordict import TensorDict
 from .speculative_manager import SpeculativeManager
 from .corrector import build_corrector_from_cfg, corrector_loss

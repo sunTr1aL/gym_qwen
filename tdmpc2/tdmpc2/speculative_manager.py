@@ -3,7 +3,7 @@ from typing import List, Optional, Sequence
 
 import torch
 
-from common import math
+from tdmpc2.common import math
 
 
 @dataclass
