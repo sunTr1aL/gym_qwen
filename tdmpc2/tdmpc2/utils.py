@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from omegaconf import OmegaConf
 
-from tdmpc2 import TDMPC2
 from tdmpc2.common.parser import parse_cfg
 from tdmpc2.common.seed import set_seed
 
@@ -168,6 +167,9 @@ def load_pretrained_tdmpc2(
         raise RuntimeError("CUDA requested but not available; choose cpu device instead.")
 
     set_seed(cfg.seed)
+    # Local import to avoid circular imports when importing module-level
+    # helpers (e.g., DEFAULT_PRETRAINED_URLS) from scripts.
+    from tdmpc2.tdmpc2 import TDMPC2
     agent = TDMPC2(cfg)
     agent.load(ckpt_path)
     agent.eval()
