@@ -40,6 +40,21 @@ The codebase is intended for research on speeding up model-based control with mi
 
 -----
 
+## Using official pretrained TD-MPC2 teachers
+You can skip training the teacher from scratch by downloading the official checkpoints (all sizes except the ~1M model):
+
+```bash
+cd tdmpc2
+python scripts/download_tdmpc2_models.py \
+  --output_dir tdmpc2_pretrained
+```
+
+- By default the downloader skips the smallest model; pass `--include_smallest` if you explicitly want it.
+- Checkpoints are saved as `tdmpc2_pretrained/tdmpc2_<size>.pt` (e.g., `tdmpc2_5m.pt`, `tdmpc2_19m.pt`, `tdmpc2_48m.pt`, `tdmpc2_317m.pt`).
+- You can also point `--manifest` to a JSON mapping of `{ "5m": "https://...pt", ... }` to override URLs.
+
+-----
+
 ## Training the TD-MPC2 Teacher
 Train the single-task TD-MPC2-style agent with Hydra (defaults in `tdmpc2/config.yaml`). Example:
 ```bash
@@ -57,101 +72,103 @@ python tdmpc2/train.py \
 
 -----
 
-## Collecting Corrector Training Data
-Generate distillation data from the TD-MPC2 teacher for the learned corrector:
+## Collecting corrector training data from pretrained teachers
+Use the downloaded pretrained TD-MPC2 checkpoints as frozen teachers. The script can target a single model size or iterate over all downloaded sizes (excluding ~1M by default):
+
+**Single size example (5M teacher)**
 ```bash
 cd tdmpc2
 python scripts/collect_corrector_data.py \
   --task humanoid-run \
-  --checkpoint checkpoints/tdmpc_teacher.pt \
+  --model_size 5m \
+  --model_dir tdmpc2_pretrained \
   --episodes 20 \
-  --output data/corrector_data.pt \
-  --device cuda \
   --plan_horizon 3 \
-  --teacher_interval 1
+  --history_len 4 \
+  --output data/corrector_data_5m.pt \
+  --device cuda
 ```
-The script runs the TD-MPC2 teacher in evaluation mode, logs planned actions and TD-MPC2 replans when real states deviate from predictions, and saves tensors (`z_real`, `z_pred`, `a_plan`, `a_teacher`, `distance`, optional history features) for offline corrector training.
+
+**All available pretrained sizes (auto-detected in `model_dir`)**
+```bash
+python scripts/collect_corrector_data.py \
+  --task humanoid-run \
+  --all_model_sizes \
+  --model_dir tdmpc2_pretrained \
+  --episodes 20 \
+  --plan_horizon 3 \
+  --history_len 4 \
+  --output data/corrector_data.pt
+```
+
+- The default output name is automatically expanded to `data/corrector_data_<size>.pt` when `--all_model_sizes` is used.
+- Each dataset stores `z_real`, `z_pred`, `a_plan`, `a_teacher`, `distance`, and `history_feats` so both the two-tower and temporal correctors can train from the same file.
 
 -----
 
-## Training the Corrector (Distillation)
-Train the learned corrector on the collected dataset:
+## Training the corrector (per pretrained size)
+Train both corrector architectures on the collected buffers. The trainer automatically picks the right dataset naming pattern and saves per-size checkpoints.
+
+**Train both correctors for a single pretrained size**
 ```bash
 cd tdmpc2
-# Two-tower corrector
 python tdmpc2/train_corrector.py \
-  --data data/corrector_data.pt \
-  --tdmpc_ckpt checkpoints/tdmpc_teacher.pt \
-  --save_path checkpoints/corrector_two_tower.pth \
-  --corrector_type two_tower \
+  --model_size 5m \
+  --data_dir data \
+  --corrector_type both \
   --epochs 20 \
-  --batch_size 256
-
-# Temporal transformer corrector
-python tdmpc2/train_corrector.py \
-  --data data/corrector_data.pt \
-  --tdmpc_ckpt checkpoints/tdmpc_teacher.pt \
-  --save_path checkpoints/corrector_temporal.pth \
-  --corrector_type temporal \
+  --batch_size 256 \
   --history_len 4 \
-  --epochs 20
+  --device cuda
 ```
-The corrector is distilled to imitate TD-MPC2 replanning behavior so speculative actions can be adjusted when real trajectories diverge from planned ones.
+This produces `correctors/corrector_5m_two_tower.pth` and `correctors/corrector_5m_temporal.pth`.
+
+**Train across every available dataset (matching all downloaded pretrained sizes)**
+```bash
+python tdmpc2/train_corrector.py \
+  --model_size all \
+  --data_dir data \
+  --corrector_type both \
+  --epochs 20 \
+  --batch_size 256 \
+  --history_len 4
+```
+- Use `--corrector_type two_tower` or `--corrector_type temporal` to limit training to a single architecture.
+- Pass `--data <path>` to target a custom dataset file instead of per-size discovery.
 
 -----
 
-## Evaluating Speculative Execution
-Use `scripts/eval_corrector.py` to compare baseline TD-MPC2 and speculative execution variants.
+## Evaluating speculative execution (baseline vs. correctors)
+`scripts/eval_corrector.py` now evaluates baseline TD-MPC2 replanning, open-loop execution (2- and 3-step), and both correctors for each pretrained size. Results are aggregated into a CSV for plotting.
 
-1. **Baseline TD-MPC2 (no speculation)**
-   ```bash
-   cd tdmpc2
-   python scripts/eval_corrector.py \
-     --task humanoid-run \
-     --tdmpc_checkpoint checkpoints/tdmpc_teacher.pt \
-     --mode baseline \
-     --episodes 10 \
-     --device cuda
-   ```
+**Evaluate a single pretrained size (reads checkpoints from `model_dir` and correctors from `corrector_dir`)**
+```bash
+cd tdmpc2
+python scripts/eval_corrector.py \
+  --task humanoid-run \
+  --model_size 5m \
+  --model_dir tdmpc2_pretrained \
+  --corrector_dir correctors \
+  --episodes 10 \
+  --spec_plan_horizon 3 \
+  --device cuda \
+  --results_csv results/corrector_eval/summary.csv
+```
 
-2. **Speculative execution without corrector (3-step horizon)**
-   ```bash
-   python scripts/eval_corrector.py \
-     --task humanoid-run \
-     --tdmpc_checkpoint checkpoints/tdmpc_teacher.pt \
-     --mode naive3 \
-     --spec_plan_horizon 3 \
-     --spec_exec_horizon 3 \
-     --spec_mismatch_threshold 0.5
-   ```
+**Evaluate all downloaded pretrained sizes**
+```bash
+python scripts/eval_corrector.py \
+  --task humanoid-run \
+  --all_model_sizes \
+  --model_dir tdmpc2_pretrained \
+  --corrector_dir correctors \
+  --episodes 10 \
+  --spec_plan_horizon 3 \
+  --results_csv results/corrector_eval/summary.csv
+```
 
-3. **Speculative execution with corrector (3-step horizon)**
-   ```bash
-   python scripts/eval_corrector.py \
-     --task humanoid-run \
-     --tdmpc_checkpoint checkpoints/tdmpc_teacher.pt \
-     --corrector_checkpoint checkpoints/corrector_two_tower.pth \
-     --corrector_type two_tower \
-     --mode spec_corrector \
-     --spec_plan_horizon 3 \
-     --spec_exec_horizon 3 \
-     --spec_mismatch_threshold 0.5
-   ```
-
-4. **Extended speculative execution with corrector (e.g., 6-step horizon)**
-   ```bash
-   python scripts/eval_corrector.py \
-     --task humanoid-run \
-     --tdmpc_checkpoint checkpoints/tdmpc_teacher.pt \
-     --corrector_checkpoint checkpoints/corrector_temporal.pth \
-     --corrector_type temporal \
-     --mode spec6_corrector \
-     --spec_plan_horizon 6 \
-     --spec_exec_horizon 6 \
-     --spec_mismatch_threshold 0.5
-   ```
-
-Metrics are printed to stdout; optionally save JSON metrics with `--output_metrics_path <file>`.
+- Per-run JSON/CSV metrics are written under `results/corrector_eval/`, and an aggregated summary CSV is saved to `--results_csv`.
+- Use `scripts/plot_corrector_eval.py --results_csv results/corrector_eval/summary.csv --output_dir results/corrector_eval/plots` to generate horizon/model-size/improvement plots.
 
 -----
 

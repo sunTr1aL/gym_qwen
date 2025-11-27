@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Evaluate TD-MPC2 with speculative execution and correctors."""
+"""Evaluate TD-MPC2 open-loop execution with and without corrective models."""
+
+from __future__ import annotations
 
 import argparse
 import csv
@@ -9,55 +11,79 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from common.parser import parse_cfg  # noqa: E402
-from common.seed import set_seed  # noqa: E402
-from envs import make_env  # noqa: E402
+from tdmpc2.common.seed import set_seed  # noqa: E402
+from tdmpc2.envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
-from tdmpc2.launch import launch, wrap_dataparallel
+from tdmpc2.launch import launch, wrap_dataparallel  # noqa: E402
+from tdmpc2.utils_ckpt import list_pretrained_checkpoints, load_pretrained_tdmpc2  # noqa: E402
+
+EVAL_VARIANTS = [
+    {"name": "baseline_replan", "exec_horizon": 1, "corrector_type": None},
+    {"name": "open_loop_2", "exec_horizon": 2, "corrector_type": None},
+    {"name": "open_loop_3", "exec_horizon": 3, "corrector_type": None},
+    {"name": "corrected_two_tower_2", "exec_horizon": 2, "corrector_type": "two_tower"},
+    {"name": "corrected_temporal_2", "exec_horizon": 2, "corrector_type": "temporal"},
+    {"name": "corrected_two_tower_3", "exec_horizon": 3, "corrector_type": "two_tower"},
+    {"name": "corrected_temporal_3", "exec_horizon": 3, "corrector_type": "temporal"},
+]
 
 
-VARIANT_ALIASES = {
-    "naive3": "3step_naive",
-    "spec_corrector": "3step_corrector",
-    "spec6_corrector": "6step_corrector",
-}
+def _resolve_models(args: argparse.Namespace) -> Iterable[tuple[str, Dict[str, str]]]:
+    ckpts = list_pretrained_checkpoints(
+        args.checkpoint_dir, model_size_filter=args.model_size
+    )
+    if args.all_models or args.all_model_sizes or not args.model_id:
+        if not ckpts:
+            raise ValueError(f"No pretrained checkpoints found in {args.checkpoint_dir}")
+        return ckpts.items()
+    if args.model_id not in ckpts:
+        raise ValueError(
+            f"Model id '{args.model_id}' not found in {args.checkpoint_dir}. Available: {list(ckpts.keys())}"
+        )
+    return [(args.model_id, ckpts[args.model_id])]
 
 
-def resolve_variant(args: argparse.Namespace) -> str:
-    if args.variant:
-        return args.variant
-    return VARIANT_ALIASES.get(args.mode, args.mode)
+def _corrector_ckpt_for(model_id: str, corr_type: Optional[str], args: argparse.Namespace) -> Optional[str]:
+    if corr_type is None:
+        return None
+    if args.corrector_checkpoint:
+        return args.corrector_checkpoint
+    ckpt_path = Path(args.corrector_dir) / f"corrector_{model_id}_{corr_type}.pth"
+    return str(ckpt_path)
 
 
-def build_cfg(args: argparse.Namespace) -> Tuple[Any, str]:
-    variant = resolve_variant(args)
-    cfg_path = Path(args.config) if args.config else REPO_ROOT / "tdmpc2" / "config.yaml"
-    cfg = OmegaConf.load(cfg_path)
-    cfg.task = args.task or cfg.get("task")
-    cfg.device = args.device
-    cfg.seed = args.seed
-    cfg.eval_episodes = args.episodes
-    cfg.checkpoint = args.tdmpc_checkpoint
-    cfg.spec_enabled = variant != "baseline"
-    cfg.spec_plan_horizon = args.spec_plan_horizon
-    cfg.spec_exec_horizon = max(args.spec_exec_horizon, 6) if variant == "6step_corrector" else args.spec_exec_horizon
-    cfg.spec_mismatch_threshold = args.spec_mismatch_threshold
-    cfg.use_corrector = variant in {"3step_corrector", "6step_corrector"}
-    cfg.corrector_ckpt = args.corrector_checkpoint
-    cfg.corrector_type = args.corrector_type
-    cfg.speculate = False
-    cfg = parse_cfg(cfg)
-    return cfg, variant
+def _build_agent(model_id: str, ckpt_path: str, variant: Dict[str, Any], args: argparse.Namespace):
+    corr_type = variant["corrector_type"]
+    exec_h = variant["exec_horizon"]
+    corrector_ckpt = _corrector_ckpt_for(model_id, corr_type, args)
+    spec_overrides = {
+        "spec_enabled": exec_h > 1 or bool(corr_type),
+        "speculate": False,
+        "spec_plan_horizon": max(args.spec_plan_horizon, exec_h, 3),
+        "spec_exec_horizon": exec_h,
+        "spec_mismatch_threshold": args.spec_mismatch_threshold,
+        "use_corrector": bool(corr_type),
+        "corrector_ckpt": corrector_ckpt,
+    }
+    agent, cfg, metadata = load_pretrained_tdmpc2(
+        model_id,
+        checkpoint_path=ckpt_path,
+        device=args.device,
+        task=args.task,
+        config_path=args.config,
+        spec_overrides=spec_overrides,
+        corrector_ckpt=corrector_ckpt,
+    )
+    return agent, cfg, metadata, corrector_ckpt
 
 
 def run_rollout(agent: TDMPC2, env, episodes: int, max_steps: int) -> Dict[str, List[float]]:
@@ -126,117 +152,144 @@ def summarize(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     }
 
 
-def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
-    del world_size  # evaluation runs in a single process
-
-    set_seed(args.seed)
-    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
-    device = torch.device("cuda" if use_gpu else "cpu")
-
-    cfg, inferred_variant = build_cfg(args)
-    if use_gpu:
-        cfg.device = str(device)
-    env = make_env(cfg)
-    agent = TDMPC2(cfg)
-    agent.load(args.tdmpc_checkpoint)
-    agent.eval()
-
-    if use_gpu and torch.cuda.device_count() > 1:
-        agent.model = wrap_dataparallel(agent.model)
-        if getattr(agent, "corrector", None) is not None:
-            agent.corrector = wrap_dataparallel(agent.corrector)
-
-    metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
-    summary = summarize(metrics)
-    variant = args.variant or inferred_variant
-    meta = {
-        "task": args.task or cfg.task,
-        "variant": variant,
-        "corrector_type": args.corrector_type,
-        "spec_plan_horizon": cfg.spec_plan_horizon,
-        "spec_exec_horizon": cfg.spec_exec_horizon,
-        "episodes": args.episodes,
-        "seed": cfg.seed,
-        "tdmpc_checkpoint": args.tdmpc_checkpoint,
-        "corrector_checkpoint": args.corrector_checkpoint,
-    }
-    print("Summary:", summary)
-    os.makedirs(args.results_dir, exist_ok=True)
+def _save_run_files(
+    meta: Dict[str, Any],
+    metrics: Dict[str, List[float]],
+    summary: Dict[str, float],
+    args: argparse.Namespace,
+) -> None:
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_id = f"{meta['task']}_{meta['variant']}_{meta['corrector_type']}_seed{meta['seed']}"
-    base = os.path.join(args.results_dir, f"{run_id}_{ts}")
-    with open(base + "_eval.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "meta": meta,
-                "summary": summary,
-                "episodes": [
-                    {
-                        "return": float(r),
-                        "length": int(l),
-                        "num_replans": int(nr),
-                        "num_corrector_steps": int(nc),
-                    }
-                    for r, l, nr, nc in zip(
-                        metrics["returns"], metrics["lengths"], metrics["replans"], metrics["corrector_steps"]
-                    )
-                ],
-            },
-            f,
-            indent=2,
-        )
-    with open(base + "_eval.csv", "w", newline="", encoding="utf-8") as f:
+    run_id = f"{meta['task']}_{meta['variant']}_{meta['model_id']}_{meta['corrector_type'] or 'none'}_seed{meta['seed']}"
+    base = Path(args.results_dir) / f"{run_id}_{ts}"
+    base.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(base) + "_eval.json", "w", encoding="utf-8") as f:
+        json.dump({"meta": meta, "summary": summary, "metrics": metrics}, f, indent=2)
+    with open(str(base) + "_eval.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["episode", "return", "length", "num_replans", "num_corrector_steps"])
         for i, (r, l, nr, nc) in enumerate(
             zip(metrics["returns"], metrics["lengths"], metrics["replans"], metrics["corrector_steps"])
         ):
             writer.writerow([i, r, l, nr, nc])
-    if args.output_metrics_path:
-        out_dir = os.path.dirname(args.output_metrics_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        with open(args.output_metrics_path, "w", encoding="utf-8") as f:
-            json.dump({"meta": meta, "metrics": metrics, "summary": summary}, f, indent=2)
+
+
+def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    del world_size  # evaluation runs in a single process
+
+    set_seed(args.seed)
+    results: List[Dict[str, Any]] = []
+
+    for model_id, info in _resolve_models(args):
+        ckpt_path = info["path"]
+        model_name = info.get("model_name", "")
+        model_size = info.get("model_size", "")
+        for variant in EVAL_VARIANTS:
+            corr_type = variant["corrector_type"]
+            agent, cfg, _, corrector_ckpt = _build_agent(model_id, ckpt_path, variant, args)
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+                agent.model = wrap_dataparallel(agent.model)
+                if getattr(agent, "corrector", None) is not None:
+                    agent.corrector = wrap_dataparallel(agent.corrector)
+            env = make_env(cfg)
+            metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
+            summary = summarize(metrics)
+            meta = {
+                "task": args.task or cfg.task,
+                "variant": variant["name"],
+                "model_id": model_id,
+                "model_name": model_name,
+                "model_size": model_size,
+                "corrector_type": corr_type,
+                "exec_horizon": variant["exec_horizon"],
+                "episodes": args.episodes,
+                "seed": cfg.seed,
+                "tdmpc_checkpoint": cfg.checkpoint,
+                "corrector_checkpoint": corrector_ckpt,
+            }
+            print("Summary:", summary)
+            _save_run_files(meta, metrics, summary, args)
+            record = {**meta, **summary}
+            results.append(record)
+
+    results_csv = Path(args.results_csv)
+    results_csv.parent.mkdir(parents=True, exist_ok=True)
+    if results:
+        with open(results_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=list(results[0].keys()),
+            )
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"Saved aggregated results to {results_csv}")
+    else:
+        print("No results produced; check configuration.")
+
+    if results and args.output_plot:
+        try:
+            import matplotlib.pyplot as plt
+            import pandas as pd
+
+            df = pd.DataFrame(results)
+            df["corrector_label"] = df["corrector_type"].fillna("none")
+            grouped = df.groupby(["corrector_label", "exec_horizon"])["mean_return"].mean().unstack(fill_value=0)
+            horizons = grouped.columns.tolist()
+            plt.figure(figsize=(8, 5))
+            for corr_type, row in grouped.iterrows():
+                plt.plot(horizons, row.values, marker="o", label=corr_type)
+            plt.xlabel("Execution horizon (steps)")
+            plt.ylabel("Mean return (avg across models)")
+            plt.title("Performance vs execution horizon")
+            plt.grid(True, linestyle="--", alpha=0.5)
+            plt.legend(title="Corrector")
+            Path(args.output_plot).parent.mkdir(parents=True, exist_ok=True)
+            plt.tight_layout()
+            plt.savefig(args.output_plot, dpi=200)
+            print(f"Saved aggregate plot to {args.output_plot}")
+        except Exception as exc:  # pragma: no cover - plotting optional
+            print(f"Failed to generate aggregate plot: {exc}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
-    parser.add_argument("--tdmpc_checkpoint", type=str, required=True, help="Path to TD-MPC2 checkpoint")
-    parser.add_argument("--corrector_checkpoint", type=str, default=None, help="Path to trained corrector")
-    parser.add_argument("--corrector_type", type=str, default="two_tower", choices=["two_tower", "temporal"])
-    parser.add_argument("--mode", type=str, default="baseline", choices=["baseline", "naive3", "spec_corrector", "spec6_corrector"])
-    parser.add_argument(
-        "--variant",
-        type=str,
-        default=None,
-        help="Optional label for this eval run; if None, infer from cfg/spec settings.",
-    )
+    parser.add_argument("--model_id", type=str, default=None, help="Checkpoint stem to evaluate (e.g., tdmpc2_19m)")
+    parser.add_argument("--model_size", type=str, default=None, help="Filter checkpoints by size token (e.g., 5m)")
+    parser.add_argument("--all_models", action="store_true", help="Evaluate every checkpoint discovered in checkpoint_dir")
+    parser.add_argument("--all_model_sizes", action="store_true", help="Alias for --all_models")
+    parser.add_argument("--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory with pretrained models")
+    parser.add_argument("--corrector_dir", type=str, default="correctors", help="Directory containing trained correctors")
+    parser.add_argument("--corrector_checkpoint", type=str, default=None, help="Override corrector checkpoint path")
     parser.add_argument("--spec_plan_horizon", type=int, default=3)
-    parser.add_argument("--spec_exec_horizon", type=int, default=3)
+    parser.add_argument("--spec_exec_horizon", type=int, default=3, help="Unused placeholder for backward compatibility")
     parser.add_argument("--spec_mismatch_threshold", type=float, default=0.5)
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max_steps", type=int, default=-1)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--config", type=str, default=None)
-    parser.add_argument("--output_metrics_path", type=str, default=None)
     parser.add_argument(
         "--results_dir",
         type=str,
         default="results/corrector_eval",
-        help="Directory to save evaluation metrics (JSON/CSV).",
+        help="Directory to save per-run evaluation metrics (JSON/CSV).",
+    )
+    parser.add_argument("--results_csv", type=str, default="results/corrector_eval/summary.csv")
+    parser.add_argument("--output_csv", dest="results_csv", type=str, help="Alias for --results_csv")
+    parser.add_argument(
+        "--output_plot",
+        type=str,
+        default=None,
+        help="Optional path to save a quick aggregate horizon plot (uses aggregated CSV).",
     )
     parser.add_argument(
         "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list",
     )
-    args = parser.parse_args()
-    valid_variants = {"baseline", "3step_naive", "3step_corrector", "6step_corrector"}
-    if args.variant is not None and args.variant not in valid_variants:
-        parser.error(f"--variant must be one of {sorted(valid_variants)}")
-    return args
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    launch(parse_args(), main_worker, use_ddp=False, allow_dataparallel=True)
+    _args = parse_args()
+    if _args.all_model_sizes:
+        _args.all_models = True
+    launch(_args, main_worker, use_ddp=False, allow_dataparallel=True)
