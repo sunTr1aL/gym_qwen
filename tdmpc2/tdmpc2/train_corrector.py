@@ -14,6 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from tdmpc2.corrector import build_corrector_from_cfg, corrector_loss
 from tdmpc2.launch import cleanup_ddp, ddp_available, launch, setup_ddp, wrap_dataparallel
+from tdmpc2.utils_ckpt import list_pretrained_checkpoints
 
 
 class CorrectorDataset(Dataset):
@@ -102,15 +103,15 @@ def maybe_concat(paths: List[Path], device: torch.device) -> Dict[str, torch.Ten
     return {k: torch.cat([t[k] for t in tensors], dim=0) for k in keys}
 
 
-def discover_dataset_sizes(data_dir: str) -> List[str]:
-    sizes: List[str] = []
+def discover_dataset_ids(data_dir: str) -> List[str]:
+    ids: List[str] = []
     for path in Path(data_dir).glob("corrector_data_*.pt"):
         name = path.stem.replace("corrector_data_", "")
-        if not name or name.lower().startswith("1m"):
+        if not name:
             continue
-        if name not in sizes:
-            sizes.append(name)
-    return sorted(sizes)
+        if name not in ids:
+            ids.append(name)
+    return sorted(ids)
 
 
 def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
@@ -222,7 +223,14 @@ def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
 
     if rank == 0:
         state = corrector.module.state_dict() if hasattr(corrector, "module") else corrector.state_dict()
-        torch.save({"corrector": state, "corrector_type": args.corrector_type}, args.save_path)
+        torch.save(
+            {
+                "corrector": state,
+                "corrector_type": args.corrector_type,
+                "model_id": getattr(args, "model_id", None),
+            },
+            args.save_path,
+        )
         os.makedirs(args.results_dir, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         run_id_parts = [f"{args.corrector_type}", f"bs{args.batch_size}", f"lr{args.lr}"]
@@ -240,6 +248,7 @@ def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             "lambda_reg": args.reg_lambda,
             "filter_min_distance": args.filter_min_distance,
             "dataset_path": args.data,
+            "model_id": getattr(args, "model_id", None),
             "seed": args.seed,
         }
         with open(base + "_metrics.json", "w", encoding="utf-8") as f:
@@ -269,8 +278,10 @@ def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a speculative action corrector offline.")
     parser.add_argument("--data", type=str, required=False, help="Path to saved corrector buffer (.pt) or directory of buffers")
-    parser.add_argument("--data_dir", type=str, default="data", help="Directory containing per-model-size datasets")
-    parser.add_argument("--model_size", type=str, default=None, help='Model size to train on (e.g., "5m", "all")')
+    parser.add_argument("--data_dir", type=str, default="data", help="Directory containing per-model datasets")
+    parser.add_argument("--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory containing pretrained TD-MPC2 checkpoints")
+    parser.add_argument("--model_id", type=str, default=None, help="Model id (checkpoint stem) to train for")
+    parser.add_argument("--all_models", action="store_true", help="Train correctors for every checkpoint discovered")
     parser.add_argument(
         "--save_path", type=str, default="corrector.pth", help="Output path for trained weights (single run)",
     )
@@ -300,33 +311,48 @@ def main() -> None:
     parser.add_argument(
         "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
     )
+    parser.add_argument(
+        "--exclude_pattern",
+        action="append",
+        help="Optional substring(s) to skip when discovering checkpoints",
+    )
     args = parser.parse_args()
 
-    target_sizes: List[str]
-    if args.model_size == "all":
-        target_sizes = discover_dataset_sizes(args.data_dir)
-    elif args.model_size:
-        target_sizes = [args.model_size]
+    if args.all_models or args.model_id:
+        ckpts = list_pretrained_checkpoints(args.checkpoint_dir, exclude_patterns=args.exclude_pattern)
+        if args.all_models:
+            target_models = list(ckpts.keys())
+        else:
+            if args.model_id not in ckpts:
+                raise ValueError(
+                    f"Model id '{args.model_id}' not found in {args.checkpoint_dir}. Available: {list(ckpts.keys())}"
+                )
+            target_models = [args.model_id]
+    elif args.data is None:
+        target_models = discover_dataset_ids(args.data_dir)
+        if not target_models:
+            raise ValueError("No datasets found; specify --data or ensure data_dir has corrector_data_<model_id>.pt")
     else:
-        target_sizes = [None]
+        target_models = [Path(args.data).stem.replace("corrector_data_", "") or None]
 
     target_types = ["two_tower", "temporal"] if args.corrector_type == "both" else [args.corrector_type]
 
-    for size in target_sizes:
+    for model_id in target_models:
         for corr_type in target_types:
             run_args = copy.deepcopy(args)
             run_args.corrector_type = corr_type
+            run_args.model_id = model_id
             if args.data is None:
-                if size is None:
-                    raise ValueError("Dataset path (--data) required when model_size is not provided.")
-                run_args.data = os.path.join(args.data_dir, f"corrector_data_{size}.pt")
-            if args.save_path == "corrector.pth" or args.corrector_type == "both" or args.model_size in {"all", None}:
+                if model_id is None:
+                    raise ValueError("Dataset path (--data) required when model_id is not provided.")
+                run_args.data = os.path.join(args.data_dir, f"corrector_data_{model_id}.pt")
+            if args.save_path == "corrector.pth" or args.corrector_type == "both" or args.all_models or not args.model_id:
                 os.makedirs(args.corrector_dir, exist_ok=True)
-                suffix = f"_{size}" if size else ""
+                suffix = f"_{model_id}" if model_id else ""
                 run_args.save_path = os.path.join(
                     args.corrector_dir, f"corrector{suffix}_{corr_type}.pth"
                 )
-            print(f"Training corrector type={corr_type} for size={size or 'dataset'} using {run_args.data}")
+            print(f"Training corrector type={corr_type} for model_id={model_id or 'dataset'} using {run_args.data}")
             launch(run_args, train_worker, use_ddp=True, allow_dataparallel=True)
 
 

@@ -42,7 +42,7 @@ def plot_horizon(records: List[Dict], output_path: str) -> None:
     print(f"Saved horizon plot to {output_path}")
 
 
-def plot_model_sizes(records: List[Dict], output_path: str) -> None:
+def plot_model_ids(records: List[Dict], output_path: str) -> None:
     if not records:
         print("No records to plot.")
         return
@@ -52,21 +52,21 @@ def plot_model_sizes(records: List[Dict], output_path: str) -> None:
         print("No horizon-3 evaluations to plot for model sizes.")
         return
     variants = ["open_loop_3", "corrected_two_tower_3", "corrected_temporal_3", "baseline_replan"]
-    model_sizes = sorted({r["model_size"] for r in filtered})
+    model_ids = sorted({r["model_id"] for r in filtered})
     width = 0.18
-    positions = range(len(model_sizes))
+    positions = range(len(model_ids))
     plt.figure(figsize=(10, 5))
     for idx, var in enumerate(variants):
         vals = []
-        for size in model_sizes:
-            match = next((r for r in filtered if r["model_size"] == size and r["variant"] == var), None)
+        for model_id in model_ids:
+            match = next((r for r in filtered if r["model_id"] == model_id and r["variant"] == var), None)
             vals.append(match.get("mean_return") if match else 0.0)
         offsets = [p + (idx - len(variants) / 2) * width for p in positions]
         plt.bar(offsets, vals, width=width, label=var)
-    plt.xticks(list(positions), model_sizes)
-    plt.xlabel("Model size")
+    plt.xticks(list(positions), model_ids)
+    plt.xlabel("Model id")
     plt.ylabel("Mean return (horizon=3)")
-    plt.title("Performance vs model size")
+    plt.title("Performance vs model id")
     plt.legend()
     plt.grid(True, axis="y", linestyle="--", alpha=0.5)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -78,14 +78,14 @@ def plot_model_sizes(records: List[Dict], output_path: str) -> None:
 def plot_improvement(records: List[Dict], output_path: str) -> None:
     improvements: List[tuple] = []
     for horizon in (2, 3):
-        base = {(r["model_size"], horizon): r for r in records if r["exec_horizon"] == horizon and r["corrector_type"] in (None, "", "none")}
+        base = {(r["model_id"], horizon): r for r in records if r["exec_horizon"] == horizon and r["corrector_type"] in (None, "", "none")}
         for corr_type in ("two_tower", "temporal"):
             for rec in records:
                 if rec["exec_horizon"] != horizon or rec.get("corrector_type") != corr_type:
                     continue
-                key = (rec["model_size"], horizon)
+                key = (rec["model_id"], horizon)
                 base_return = base.get(key, {}).get("mean_return", 0.0)
-                improvements.append((corr_type, rec["model_size"], horizon, rec["mean_return"] - base_return))
+                improvements.append((corr_type, rec["model_id"], horizon, rec["mean_return"] - base_return))
     if not improvements:
         print("No improvement data to plot.")
         return
@@ -117,7 +117,7 @@ def main() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
     plot_horizon(records, os.path.join(args.output_dir, "performance_vs_horizon.png"))
-    plot_model_sizes(records, os.path.join(args.output_dir, "performance_vs_model_size.png"))
+    plot_model_ids(records, os.path.join(args.output_dir, "performance_vs_model_id.png"))
     plot_improvement(records, os.path.join(args.output_dir, "corrector_improvement.png"))
 
 

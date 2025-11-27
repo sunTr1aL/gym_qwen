@@ -24,7 +24,7 @@ from common.seed import set_seed  # noqa: E402
 from envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
 from tdmpc2.launch import launch, wrap_dataparallel  # noqa: E402
-from tdmpc2.utils import available_pretrained_sizes, load_pretrained_tdmpc2  # noqa: E402
+from tdmpc2.utils_ckpt import list_pretrained_checkpoints, load_pretrained_tdmpc2  # noqa: E402
 
 EVAL_VARIANTS = [
     {"name": "baseline_replan", "exec_horizon": 1, "corrector_type": None},
@@ -37,30 +37,32 @@ EVAL_VARIANTS = [
 ]
 
 
-def _resolve_sizes(args: argparse.Namespace) -> Iterable[str]:
-    if args.all_model_sizes:
-        sizes = available_pretrained_sizes(args.model_dir, include_smallest=False)
-        if not sizes:
-            raise ValueError(f"No pretrained checkpoints found in {args.model_dir}")
-        return sizes
-    if args.model_size:
-        return [args.model_size]
-    raise ValueError("Provide --model_size or --all_model_sizes to select checkpoints for evaluation.")
+def _resolve_models(args: argparse.Namespace) -> Iterable[tuple[str, str]]:
+    ckpts = list_pretrained_checkpoints(args.checkpoint_dir, exclude_patterns=args.exclude_pattern)
+    if args.all_models or not args.model_id:
+        if not ckpts:
+            raise ValueError(f"No pretrained checkpoints found in {args.checkpoint_dir}")
+        return ckpts.items()
+    if args.model_id not in ckpts:
+        raise ValueError(
+            f"Model id '{args.model_id}' not found in {args.checkpoint_dir}. Available: {list(ckpts.keys())}"
+        )
+    return [(args.model_id, ckpts[args.model_id])]
 
 
-def _corrector_ckpt_for(size: str, corr_type: Optional[str], args: argparse.Namespace) -> Optional[str]:
+def _corrector_ckpt_for(model_id: str, corr_type: Optional[str], args: argparse.Namespace) -> Optional[str]:
     if corr_type is None:
         return None
     if args.corrector_checkpoint:
         return args.corrector_checkpoint
-    ckpt_path = Path(args.corrector_dir) / f"corrector_{size}_{corr_type}.pth"
+    ckpt_path = Path(args.corrector_dir) / f"corrector_{model_id}_{corr_type}.pth"
     return str(ckpt_path)
 
 
-def _build_agent(size: str, variant: Dict[str, Any], args: argparse.Namespace):
+def _build_agent(model_id: str, ckpt_path: str, variant: Dict[str, Any], args: argparse.Namespace):
     corr_type = variant["corrector_type"]
     exec_h = variant["exec_horizon"]
-    corrector_ckpt = _corrector_ckpt_for(size, corr_type, args)
+    corrector_ckpt = _corrector_ckpt_for(model_id, corr_type, args)
     spec_overrides = {
         "spec_enabled": exec_h > 1 or bool(corr_type),
         "speculate": False,
@@ -71,8 +73,8 @@ def _build_agent(size: str, variant: Dict[str, Any], args: argparse.Namespace):
         "corrector_ckpt": corrector_ckpt,
     }
     agent, cfg, metadata = load_pretrained_tdmpc2(
-        size,
-        model_dir=args.model_dir,
+        model_id,
+        checkpoint_path=ckpt_path,
         device=args.device,
         task=args.task,
         config_path=args.config,
@@ -155,7 +157,7 @@ def _save_run_files(
     args: argparse.Namespace,
 ) -> None:
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_id = f"{meta['task']}_{meta['variant']}_{meta['model_size']}_{meta['corrector_type'] or 'none'}_seed{meta['seed']}"
+    run_id = f"{meta['task']}_{meta['variant']}_{meta['model_id']}_{meta['corrector_type'] or 'none'}_seed{meta['seed']}"
     base = Path(args.results_dir) / f"{run_id}_{ts}"
     base.parent.mkdir(parents=True, exist_ok=True)
     with open(str(base) + "_eval.json", "w", encoding="utf-8") as f:
@@ -175,10 +177,10 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     set_seed(args.seed)
     results: List[Dict[str, Any]] = []
 
-    for size in _resolve_sizes(args):
+    for model_id, ckpt_path in _resolve_models(args):
         for variant in EVAL_VARIANTS:
             corr_type = variant["corrector_type"]
-            agent, cfg, _, corrector_ckpt = _build_agent(size, variant, args)
+            agent, cfg, _, corrector_ckpt = _build_agent(model_id, ckpt_path, variant, args)
             if torch.cuda.is_available() and torch.cuda.device_count() > 1:
                 agent.model = wrap_dataparallel(agent.model)
                 if getattr(agent, "corrector", None) is not None:
@@ -189,7 +191,7 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             meta = {
                 "task": args.task or cfg.task,
                 "variant": variant["name"],
-                "model_size": size,
+                "model_id": model_id,
                 "corrector_type": corr_type,
                 "exec_horizon": variant["exec_horizon"],
                 "episodes": args.episodes,
@@ -220,13 +222,9 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
-    parser.add_argument("--model_size", type=str, default=None, help="Pretrained model size to evaluate")
-    parser.add_argument(
-        "--all_model_sizes",
-        action="store_true",
-        help="Evaluate every pretrained checkpoint in model_dir (excluding ~1m).",
-    )
-    parser.add_argument("--model_dir", type=str, default="tdmpc2_pretrained", help="Directory with pretrained models")
+    parser.add_argument("--model_id", type=str, default=None, help="Checkpoint stem to evaluate (e.g., tdmpc2_19m)")
+    parser.add_argument("--all_models", action="store_true", help="Evaluate every checkpoint discovered in checkpoint_dir")
+    parser.add_argument("--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory with pretrained models")
     parser.add_argument("--corrector_dir", type=str, default="correctors", help="Directory containing trained correctors")
     parser.add_argument("--corrector_checkpoint", type=str, default=None, help="Override corrector checkpoint path")
     parser.add_argument("--spec_plan_horizon", type=int, default=3)
@@ -246,6 +244,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results_csv", type=str, default="results/corrector_eval/summary.csv")
     parser.add_argument(
         "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list",
+    )
+    parser.add_argument(
+        "--exclude_pattern",
+        action="append",
+        help="Optional substring(s) to skip when discovering checkpoints",
     )
     return parser.parse_args()
 
