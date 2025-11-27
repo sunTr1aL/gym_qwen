@@ -16,7 +16,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import torch
 from omegaconf import OmegaConf
@@ -25,11 +25,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from common.parser import parse_cfg  # noqa: E402
-from common.seed import set_seed  # noqa: E402
+DEFAULT_OUTPUT = "data/corrector_data.pt"
+
+from tdmpc2.common.parser import parse_cfg  # noqa: E402
+from tdmpc2.common.seed import set_seed  # noqa: E402
 from envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
 from tdmpc2.launch import launch, wrap_dataparallel
+from tdmpc2.utils_ckpt import list_pretrained_checkpoints, load_pretrained_tdmpc2  # noqa: E402
 
 
 def default_config_path() -> Path:
@@ -115,37 +118,18 @@ def pad_history(history: deque, target_len: int, feat_dim: int) -> torch.Tensor:
     return torch.stack(padded, dim=0)
 
 
-def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
-    del world_size  # unused; collection runs in a single process
-
-    set_seed(args.seed)
-    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
-    device = torch.device("cuda" if use_gpu else "cpu")
-
-    cfg = build_cfg(args)
-    if cfg.device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but not available. Set --device cpu to collect on CPU.")
-
-    if torch.cuda.is_available():
-        cfg.device = str(device)
-
-    env = make_env(cfg)
-    agent = TDMPC2(cfg)
-    agent.load(args.checkpoint)
-    agent.eval()
-
-    if use_gpu and torch.cuda.device_count() > 1:
-        agent.model = wrap_dataparallel(agent.model)
-
+def collect_for_agent(agent: TDMPC2, cfg: Any, args: argparse.Namespace, output_path: str) -> None:
     buffer = CorrectorDataset()
     max_samples = args.max_samples if args.max_samples and args.max_samples > 0 else None
     history = deque(maxlen=args.history_len)
     feat_dim = 3 * cfg.latent_dim + cfg.action_dim
+    env = make_env(cfg)
+
     task = getattr(env, "task", None) if hasattr(env, "task") else None
     if task is None:
         task = getattr(cfg, "task", None)
 
-    print(f"Collecting corrector data for task {cfg.task} on device {cfg.device}...")
+    print(f"Collecting corrector data for task {cfg.task} on device {cfg.device} -> {output_path}")
     episodes = 0
     start_time = time.time()
     total_steps = 0
@@ -203,23 +187,82 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("Interrupted; saving collected samples so far...")
 
-    output_dir = os.path.dirname(args.output) or "."
+    output_dir = os.path.dirname(output_path) or "."
     os.makedirs(output_dir, exist_ok=True)
     data = buffer.to_tensor_dict(device="cpu")
-    torch.save(data, args.output)
+    torch.save(data, output_path)
     elapsed = time.time() - start_time
     steps_per_sec = total_steps / max(elapsed, 1e-6)
-    print(f"Saved {len(buffer)} samples to {args.output} ({steps_per_sec:.1f} env steps/sec)")
+    print(f"Saved {len(buffer)} samples to {output_path} ({steps_per_sec:.1f} env steps/sec)")
+
+
+def _resolve_models(args: argparse.Namespace) -> Iterable[tuple[str, str]]:
+    ckpts = list_pretrained_checkpoints(args.checkpoint_dir, exclude_patterns=args.exclude_pattern)
+    if args.all_models or (not args.model_id and not args.checkpoint):
+        if not ckpts:
+            raise ValueError(f"No checkpoints found in {args.checkpoint_dir}")
+        return ckpts.items()
+    if args.model_id:
+        if args.model_id not in ckpts:
+            raise ValueError(
+                f"Model id '{args.model_id}' not found in {args.checkpoint_dir}. Available: {list(ckpts.keys())}"
+            )
+        return [(args.model_id, ckpts[args.model_id])]
+    if args.checkpoint:
+        model_id = Path(args.checkpoint).stem
+        return [(model_id, args.checkpoint)]
+    raise ValueError("Provide --model_id, --all_models, or --checkpoint for manual path.")
+
+
+def _load_agent_for_model(model_id: str, ckpt_path: str, args: argparse.Namespace, device: torch.device):
+    spec_overrides = {"spec_enabled": False, "speculate": False}
+    agent, cfg, _ = load_pretrained_tdmpc2(
+        model_id,
+        checkpoint_path=ckpt_path,
+        device=str(device),
+        task=args.task,
+        config_path=args.config,
+        spec_overrides=spec_overrides,
+    )
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        agent.model = wrap_dataparallel(agent.model)
+    return agent, cfg
+
+
+def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    del world_size  # unused; collection runs in a single process
+
+    set_seed(args.seed)
+    use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
+    device = torch.device("cuda" if use_gpu else "cpu")
+
+    for model_id, ckpt_path in _resolve_models(args):
+        agent, cfg = _load_agent_for_model(model_id, ckpt_path, args, device)
+        out_path = args.output
+        if args.all_models or (args.model_id and args.output == DEFAULT_OUTPUT) or not args.model_id:
+            base_dir = os.path.dirname(args.output) or os.path.dirname(DEFAULT_OUTPUT) or "data"
+            filename = f"corrector_data_{model_id}.pt"
+            out_path = os.path.join(base_dir, filename)
+        print(f"[collect_corrector_data] model_id={model_id} checkpoint={ckpt_path}")
+        collect_for_agent(agent, cfg, args, out_path)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained TD-MPC2 checkpoint")
+    parser.add_argument("--checkpoint", type=str, required=False, default=None, help="Manual TD-MPC2 checkpoint path")
+    parser.add_argument("--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory containing pretrained checkpoints")
+    parser.add_argument("--model_id", type=str, default=None, help="Model id (checkpoint stem) to load")
+    parser.add_argument("--all_models", action="store_true", help="Iterate over all checkpoints in checkpoint_dir")
+    parser.add_argument(
+        "--exclude_pattern",
+        action="append",
+        help="Optional substring(s) to skip when discovering checkpoints",
+    )
     parser.add_argument("--episodes", type=int, default=50, help="Number of episodes to collect")
     parser.add_argument("--max_steps", type=int, default=None, help="Max steps per episode")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output", type=str, default="data/corrector_data.pt", help="Path to save dataset")
+    parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT, help="Path to save dataset")
     parser.add_argument("--min_distance", type=float, default=0.0, help="Minimum latent distance to record")
     parser.add_argument("--max_samples", type=int, default=-1, help="Maximum number of samples to collect")
     parser.add_argument("--seed", type=int, default=1, help="Random seed")
