@@ -1,4 +1,5 @@
 import argparse
+import copy
 import csv
 import datetime
 import json
@@ -99,6 +100,17 @@ def maybe_concat(paths: List[Path], device: torch.device) -> Dict[str, torch.Ten
         return tensors[0]
     keys = tensors[0].keys()
     return {k: torch.cat([t[k] for t in tensors], dim=0) for k in keys}
+
+
+def discover_dataset_sizes(data_dir: str) -> List[str]:
+    sizes: List[str] = []
+    for path in Path(data_dir).glob("corrector_data_*.pt"):
+        name = path.stem.replace("corrector_data_", "")
+        if not name or name.lower().startswith("1m"):
+            continue
+        if name not in sizes:
+            sizes.append(name)
+    return sorted(sizes)
 
 
 def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
@@ -256,9 +268,13 @@ def train_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a speculative action corrector offline.")
-    parser.add_argument("--data", type=str, required=True, help="Path to saved corrector buffer (.pt) or directory of buffers")
-    parser.add_argument("--tdmpc_ckpt", type=str, required=False, help="TD-MPC2 checkpoint to derive dimensions", default=None)
-    parser.add_argument("--save_path", type=str, default="corrector.pth", help="Output path for trained weights")
+    parser.add_argument("--data", type=str, required=False, help="Path to saved corrector buffer (.pt) or directory of buffers")
+    parser.add_argument("--data_dir", type=str, default="data", help="Directory containing per-model-size datasets")
+    parser.add_argument("--model_size", type=str, default=None, help='Model size to train on (e.g., "5m", "all")')
+    parser.add_argument(
+        "--save_path", type=str, default="corrector.pth", help="Output path for trained weights (single run)",
+    )
+    parser.add_argument("--corrector_dir", type=str, default="correctors", help="Directory to store per-size correctors")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -272,7 +288,12 @@ def main() -> None:
         help="Directory where training metrics will be saved (JSON + CSV).",
     )
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--corrector_type", type=str, default="two_tower", choices=["two_tower", "temporal"])
+    parser.add_argument(
+        "--corrector_type",
+        type=str,
+        default="two_tower",
+        choices=["two_tower", "temporal", "both"],
+    )
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--history_len", type=int, default=4)
@@ -281,7 +302,32 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    launch(args, train_worker, use_ddp=True, allow_dataparallel=True)
+    target_sizes: List[str]
+    if args.model_size == "all":
+        target_sizes = discover_dataset_sizes(args.data_dir)
+    elif args.model_size:
+        target_sizes = [args.model_size]
+    else:
+        target_sizes = [None]
+
+    target_types = ["two_tower", "temporal"] if args.corrector_type == "both" else [args.corrector_type]
+
+    for size in target_sizes:
+        for corr_type in target_types:
+            run_args = copy.deepcopy(args)
+            run_args.corrector_type = corr_type
+            if args.data is None:
+                if size is None:
+                    raise ValueError("Dataset path (--data) required when model_size is not provided.")
+                run_args.data = os.path.join(args.data_dir, f"corrector_data_{size}.pt")
+            if args.save_path == "corrector.pth" or args.corrector_type == "both" or args.model_size in {"all", None}:
+                os.makedirs(args.corrector_dir, exist_ok=True)
+                suffix = f"_{size}" if size else ""
+                run_args.save_path = os.path.join(
+                    args.corrector_dir, f"corrector{suffix}_{corr_type}.pth"
+                )
+            print(f"Training corrector type={corr_type} for size={size or 'dataset'} using {run_args.data}")
+            launch(run_args, train_worker, use_ddp=True, allow_dataparallel=True)
 
 
 
