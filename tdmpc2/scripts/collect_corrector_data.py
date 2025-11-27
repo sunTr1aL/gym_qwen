@@ -31,7 +31,6 @@ from tdmpc2.common.parser import parse_cfg  # noqa: E402
 from tdmpc2.common.seed import set_seed  # noqa: E402
 from tdmpc2.envs import make_env  # noqa: E402
 from tdmpc2 import TDMPC2  # noqa: E402
-from tdmpc2.launch import launch, wrap_dataparallel
 from tdmpc2.utils_ckpt import list_pretrained_checkpoints, load_pretrained_tdmpc2  # noqa: E402
 
 
@@ -224,14 +223,10 @@ def _load_agent_for_model(model_id: str, ckpt_path: str, args: argparse.Namespac
         config_path=args.config,
         spec_overrides=spec_overrides,
     )
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        agent.model = wrap_dataparallel(agent.model)
     return agent, cfg
 
 
-def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
-    del world_size  # unused; collection runs in a single process
-
+def main(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
     device = torch.device("cuda" if use_gpu else "cpu")
@@ -252,14 +247,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
     parser.add_argument("--checkpoint", type=str, required=False, default=None, help="Manual TD-MPC2 checkpoint path")
     parser.add_argument("--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory containing pretrained checkpoints")
+    parser.add_argument("--model_dir", dest="checkpoint_dir", type=str, default=None, help="Alias for --checkpoint_dir")
     parser.add_argument("--model_id", type=str, default=None, help="Model id (checkpoint stem) to load")
+    parser.add_argument("--model_size", dest="model_id", type=str, help="Alias for --model_id")
     parser.add_argument("--all_models", action="store_true", help="Iterate over all checkpoints in checkpoint_dir")
+    parser.add_argument("--all_model_sizes", action="store_true", help="Alias for --all_models")
     parser.add_argument(
         "--exclude_pattern",
         action="append",
         help="Optional substring(s) to skip when discovering checkpoints",
     )
-    parser.add_argument("--episodes", type=int, default=50, help="Number of episodes to collect")
+    parser.add_argument("--episodes", type=int, default=20, help="Number of episodes to collect")
     parser.add_argument("--max_steps", type=int, default=None, help="Max steps per episode")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT, help="Path to save dataset")
@@ -270,11 +268,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history_len", type=int, default=4, help="History length for temporal features")
     parser.add_argument("--plan_horizon", type=int, default=3, help="Teacher planning horizon")
     parser.add_argument("--teacher_interval", type=int, default=1, help="Collect teacher action every N steps")
-    parser.add_argument(
-        "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list"
-    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    launch(parse_args(), main_worker, use_ddp=False, allow_dataparallel=True)
+    args = parse_args()
+    if args.checkpoint_dir is None:
+        args.checkpoint_dir = "tdmpc2_pretrained"
+    if args.all_model_sizes:
+        args.all_models = True
+    main(args)
