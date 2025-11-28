@@ -2,7 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from tdmpc2.speculative_manager import SpeculativeBranch, SpeculativeManager
+from speculative_manager import SpeculativeBranch, SpeculativeManager
 
 
 class DummyCfg:

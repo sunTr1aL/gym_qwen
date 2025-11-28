@@ -8,8 +8,8 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 
-from tdmpc2.common import MODEL_SIZE, TASK_SET
-from tdmpc2.envs import make_env
+from common import MODEL_SIZE, TASK_SET
+from envs import make_env
 
 
 def _get_base_dir_for_cfg() -> Path:

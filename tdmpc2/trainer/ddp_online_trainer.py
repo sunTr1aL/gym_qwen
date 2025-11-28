@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from tensordict.tensordict import TensorDict
-from tdmpc2.trainer.base import Trainer
+from trainer.base import Trainer
 
 
 class DDPOnlineTrainer(Trainer):

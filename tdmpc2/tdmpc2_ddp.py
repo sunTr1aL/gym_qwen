@@ -11,10 +11,10 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from tdmpc2 import TDMPC2
-from tdmpc2.common import math
-from tdmpc2.common.scale import RunningScale
-from tdmpc2.common.world_model import WorldModel
-from tdmpc2.common.layers import api_model_conversion
+from common import math
+from common.layers import api_model_conversion
+from common.scale import RunningScale
+from common.world_model import WorldModel
 from tensordict import TensorDict
 
 

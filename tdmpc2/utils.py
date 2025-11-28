@@ -10,8 +10,8 @@ import torch
 from omegaconf import OmegaConf
 
 from tdmpc2 import TDMPC2
-from tdmpc2.common.parser import parse_cfg
-from tdmpc2.common.seed import set_seed
+from common.parser import parse_cfg
+from common.seed import set_seed
 
 _CANONICAL_SIZE = {1: "1m", 5: "5m", 19: "19m", 48: "48m", 317: "317m"}
 _SIZE_ALIAS = {

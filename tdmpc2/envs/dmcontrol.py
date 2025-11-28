@@ -4,8 +4,8 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from tdmpc2.envs.tasks import cheetah, walker, hopper, reacher, ball_in_cup, pendulum, fish
-from tdmpc2.envs.wrappers.timeout import Timeout
+from .tasks import ball_in_cup, cheetah, fish, hopper, pendulum, reacher, walker
+from .wrappers.timeout import Timeout
 from dm_control import suite
 suite.ALL_TASKS = suite.ALL_TASKS + suite._get_tasks('custom')
 suite.TASKS_BY_DOMAIN = suite._get_tasks_by_domain(suite.ALL_TASKS)

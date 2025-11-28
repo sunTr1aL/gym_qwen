@@ -16,10 +16,12 @@ except ImportError:  # pragma: no cover - fallback if requests unavailable
     requests = None
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.append(str(REPO_ROOT))
+SRC_ROOT = REPO_ROOT / "tdmpc2"
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.append(str(path))
 
-from tdmpc2.utils import DEFAULT_PRETRAINED_URLS  # noqa: E402
+from utils import DEFAULT_PRETRAINED_URLS  # noqa: E402
 
 
 def _download_file(url: str, dest: Path, chunk_size: int = 1024 * 1024) -> None:

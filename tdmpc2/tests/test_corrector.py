@@ -2,8 +2,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from tdmpc2.corrector import Corrector
-from tdmpc2.corrector_buffer import CorrectorBuffer
+from corrector import Corrector
+from corrector_buffer import CorrectorBuffer
 
 
 def test_corrector_applies_residual_addition():

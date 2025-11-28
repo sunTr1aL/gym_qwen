@@ -29,13 +29,13 @@ import torch.multiprocessing as mp
 import hydra
 from termcolor import colored
 
-from tdmpc2.common.parser import parse_cfg
-from tdmpc2.common.seed import set_seed
-from tdmpc2.common.buffer import Buffer
-from tdmpc2.envs import make_env
-from tdmpc2.tdmpc2_ddp import TDMPC2_DDP
-from tdmpc2.trainer.ddp_online_trainer import DDPOnlineTrainer
-from tdmpc2.common.logger import Logger
+from common.buffer import Buffer
+from common.logger import Logger
+from common.parser import parse_cfg
+from common.seed import set_seed
+from envs import make_env
+from tdmpc2_ddp import TDMPC2_DDP
+from trainer.ddp_online_trainer import DDPOnlineTrainer
 
 torch.backends.cudnn.benchmark = True
 torch.set_float32_matmul_precision('high')

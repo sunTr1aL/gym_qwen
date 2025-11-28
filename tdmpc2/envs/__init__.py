@@ -2,9 +2,8 @@ from copy import deepcopy
 import warnings
 
 import gymnasium as gym
-
-from tdmpc2.envs.wrappers.multitask import MultitaskWrapper
-from tdmpc2.envs.wrappers.tensor import TensorWrapper
+from .wrappers.multitask import MultitaskWrapper
+from .wrappers.tensor import TensorWrapper
 
 
 def missing_dependencies(task):
@@ -12,23 +11,23 @@ def missing_dependencies(task):
 
 
 try:
-    from tdmpc2.envs.dmcontrol import make_env as make_dm_control_env
+    from .dmcontrol import make_env as make_dm_control_env
 except:
     make_dm_control_env = missing_dependencies
 try:
-    from tdmpc2.envs.maniskill import make_env as make_maniskill_env
+    from .maniskill import make_env as make_maniskill_env
 except:
     make_maniskill_env = missing_dependencies
 try:
-    from tdmpc2.envs.metaworld import make_env as make_metaworld_env
+    from .metaworld import make_env as make_metaworld_env
 except:
     make_metaworld_env = missing_dependencies
 try:
-    from tdmpc2.envs.myosuite import make_env as make_myosuite_env
+    from .myosuite import make_env as make_myosuite_env
 except:
     make_myosuite_env = missing_dependencies
 try:
-    from tdmpc2.envs.mujoco import make_env as make_mujoco_env
+    from .mujoco import make_env as make_mujoco_env
 except:
     make_mujoco_env = missing_dependencies
 

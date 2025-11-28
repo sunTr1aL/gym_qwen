@@ -3,8 +3,8 @@ from copy import deepcopy
 import torch
 import torch.nn as nn
 
-from tdmpc2.common import layers, math, init
-from tdmpc2.tdmpc_transformer_dynamic import TransformerDynamics
+from common import init, layers, math
+from tdmpc_transformer_dynamic import TransformerDynamics
 from tensordict import TensorDict
 
 

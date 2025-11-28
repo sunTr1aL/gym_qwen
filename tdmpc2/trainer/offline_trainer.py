@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from tdmpc2.common.buffer import Buffer
-from tdmpc2.trainer.base import Trainer
+from common.buffer import Buffer
+from trainer.base import Trainer
 
 
 class OfflineTrainer(Trainer):

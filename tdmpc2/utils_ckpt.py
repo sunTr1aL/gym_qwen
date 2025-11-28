@@ -9,8 +9,8 @@ import torch
 from omegaconf import OmegaConf
 
 from tdmpc2 import TDMPC2
-from tdmpc2.common.parser import parse_cfg, populate_env_dims
-from tdmpc2.envs import make_env
+from common.parser import parse_cfg, populate_env_dims
+from envs import make_env
 
 
 def _canonical_model_id(model_id: str) -> str:

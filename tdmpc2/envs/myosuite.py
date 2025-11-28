@@ -1,6 +1,6 @@
 import numpy as np
 import gymnasium as gym
-from tdmpc2.envs.wrappers.timeout import Timeout
+from .wrappers.timeout import Timeout
 
 
 MYOSUITE_TASKS = {
