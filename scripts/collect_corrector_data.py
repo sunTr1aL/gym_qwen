@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-DEFAULT_OUTPUT = "data/corrector_data.pt"
+DEFAULT_OUTPUT = None
 
 from tdmpc2.common.parser import parse_cfg  # noqa: E402
 from tdmpc2.common.seed import set_seed  # noqa: E402
@@ -221,7 +221,7 @@ def collect_for_agent(
 
 def _resolve_models(args: argparse.Namespace) -> Iterable[tuple[str, Dict[str, str]]]:
     ckpts = list_pretrained_checkpoints(
-        args.checkpoint_dir, model_size_filter=args.model_size
+        args.checkpoint_dir, model_size_filter=None if args.all_model_sizes else args.model_size
     )
     if args.all_models or args.all_model_sizes or (not args.model_id and not args.checkpoint):
         if not ckpts:
@@ -261,25 +261,48 @@ def main(args: argparse.Namespace) -> None:
     use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
     device = torch.device("cuda" if use_gpu else "cpu")
 
-    for model_id, info in _resolve_models(args):
+    models = list(_resolve_models(args))
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for model_id, info in models:
         ckpt_path = info["path"]
         model_name = info.get("model_name", "")
         model_size = info.get("model_size", "")
-        agent, cfg = _load_agent_for_model(model_id, ckpt_path, args, device)
-        output_base = Path(args.output)
-        treat_as_dir = output_base.is_dir() or output_base.suffix == ""
-        if treat_as_dir or args.all_models or args.all_model_sizes:
-            base_dir = output_base if treat_as_dir else output_base.parent
-            if str(base_dir) == "":
-                base_dir = Path("data")
-            base_dir.mkdir(parents=True, exist_ok=True)
-            out_path = base_dir / f"corrector_data_{model_id}.pt"
-        else:
-            out_path = output_base
-            out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path = output_dir / f"corrector_data_{model_id}.pt"
+        if args.output is not None and not (args.all_models or args.all_model_sizes):
+            output_base = Path(args.output)
+            if output_base.is_dir() or output_base.suffix == "":
+                output_base.mkdir(parents=True, exist_ok=True)
+                out_path = output_base / f"corrector_data_{model_id}.pt"
+            else:
+                output_base.parent.mkdir(parents=True, exist_ok=True)
+                out_path = output_base
+
+        if out_path.exists() and not args.force_recollect:
+            skip_reason = "existing file"
+            try:
+                tmp = torch.load(out_path, map_location="cpu")
+                if isinstance(tmp, dict) and "z_real" in tmp and len(tmp.get("z_real", [])) > 0:
+                    print(
+                        f"[collect_corrector_data] SKIP model_id={model_id} (name={model_name}, size={model_size}) "
+                        f"because {out_path} already exists and looks valid."
+                    )
+                    continue
+                skip_reason = "present but empty/invalid"
+            except Exception:
+                skip_reason = "present but unreadable"
+            print(
+                f"[collect_corrector_data] Recollecting model_id={model_id} (name={model_name}, size={model_size}) "
+                f"because {out_path} is {skip_reason}."
+            )
+
         print(
-            f"[collect_corrector_data] model_id={model_id} name={model_name} size={model_size} checkpoint={ckpt_path}"
+            f"[collect_corrector_data] COLLECT model_id={model_id} (name={model_name}, size={model_size}), saving to {out_path}"
         )
+
+        agent, cfg = _load_agent_for_model(model_id, ckpt_path, args, device)
+
         collect_for_agent(
             agent,
             cfg,
@@ -308,7 +331,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=20, help="Number of episodes to collect")
     parser.add_argument("--max_steps", type=int, default=None, help="Max steps per episode")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT, help="Path to save dataset")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=DEFAULT_OUTPUT,
+        help="Optional explicit output file (single model only)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="data",
+        help="Directory to save per-model datasets (preferred when iterating over models)",
+    )
+    parser.add_argument("--force_recollect", action="store_true", help="Overwrite existing datasets")
     parser.add_argument("--min_distance", type=float, default=0.0, help="Minimum latent distance to record")
     parser.add_argument("--max_samples", type=int, default=-1, help="Maximum number of samples to collect")
     parser.add_argument("--seed", type=int, default=1, help="Random seed")
@@ -325,4 +360,9 @@ if __name__ == "__main__":
         args.checkpoint_dir = "tdmpc2_pretrained"
     if args.all_model_sizes:
         args.all_models = True
+    if args.output is not None and (args.all_models or args.all_model_sizes):
+        print(
+            "[collect_corrector_data] --output is ignored when iterating over multiple models; "
+            "using --output_dir for per-model datasets."
+        )
     main(args)
