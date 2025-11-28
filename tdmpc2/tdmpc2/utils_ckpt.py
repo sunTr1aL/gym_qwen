@@ -71,6 +71,10 @@ def _apply_multitask_metadata(cfg, metadata: Dict) -> None:
             cfg.task_dim = task_dim
 
 
+def _is_placeholder(val) -> bool:
+    return val is None or (isinstance(val, str) and val.strip() == "???")
+
+
 def _normalize_pretrained_cfg_numeric_fields(cfg, env_for_dims=None):
     """Normalize numeric fields when loading pretrained checkpoints outside Hydra."""
 
@@ -168,41 +172,103 @@ def load_pretrained_tdmpc2(
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
     metadata = state.get("metadata", {}) if isinstance(state, dict) else {}
 
-    cfg_file = (
-        Path(config_path)
-        if config_path is not None
-        else Path(__file__).resolve().parent / "config.yaml"
-    )
-    cfg = OmegaConf.load(cfg_file)
-    cfg.device = device
-    cfg.task = _infer_task_from_metadata(metadata, task) or cfg.get("task")
-    cfg.model_id = model_id
-    cfg.checkpoint = str(checkpoint_path)
-    cfg.use_corrector = bool(corrector_ckpt)
-    cfg.corrector_ckpt = corrector_ckpt
-    cfg.corrector_type = metadata.get("corrector_type", cfg.get("corrector_type"))
-    cfg.speculate = False
-    cfg.spec_enabled = False
-    cfg.save_video = False
-    cfg.compile = False
-    _apply_multitask_metadata(cfg, metadata)
-    if spec_overrides:
-        for k, v in spec_overrides.items():
-            setattr(cfg, k, v)
-    cfg = parse_cfg(cfg)
-    cfg, env_for_dims = populate_env_dims(cfg)
-    _normalize_pretrained_cfg_numeric_fields(cfg, env_for_dims=env_for_dims)
+    ckpt_cfg = None
+    if isinstance(state, dict):
+        for key in ("cfg", "config", "hydra_cfg"):
+            if key in state:
+                ckpt_cfg = state[key]
+                break
+
+    if ckpt_cfg is not None:
+        cfg_container = OmegaConf.to_container(ckpt_cfg, resolve=True)
+        cfg = OmegaConf.create(cfg_container)
+        cfg.device = device
+        cfg.model_id = model_id
+        cfg.checkpoint = str(checkpoint_path)
+        cfg.use_corrector = bool(corrector_ckpt)
+        cfg.corrector_ckpt = corrector_ckpt
+        cfg.corrector_type = metadata.get("corrector_type", cfg.get("corrector_type"))
+        cfg.speculate = False
+        cfg.spec_enabled = False
+        cfg.save_video = False
+        cfg.compile = False
+        cfg.disable_wandb = True
+        if spec_overrides:
+            for k, v in spec_overrides.items():
+                setattr(cfg, k, v)
+        cfg = parse_cfg(cfg)
+
+        needs_env = any(
+            _is_placeholder(getattr(cfg, field, None)) for field in ["obs_shape", "obs_dim", "action_dim", "action_dims"]
+        )
+        env_for_dims = None
+        if needs_env:
+            cfg, env_for_dims = populate_env_dims(cfg)
+        _normalize_pretrained_cfg_numeric_fields(cfg, env_for_dims=env_for_dims)
+    else:
+        cfg_file = (
+            Path(config_path)
+            if config_path is not None
+            else Path(__file__).resolve().parent / "config.yaml"
+        )
+        cfg = OmegaConf.load(cfg_file)
+        cfg.device = device
+        cfg.task = _infer_task_from_metadata(metadata, task) or cfg.get("task")
+        cfg.model_id = model_id
+        cfg.checkpoint = str(checkpoint_path)
+        cfg.use_corrector = bool(corrector_ckpt)
+        cfg.corrector_ckpt = corrector_ckpt
+        cfg.corrector_type = metadata.get("corrector_type", cfg.get("corrector_type"))
+        cfg.speculate = False
+        cfg.spec_enabled = False
+        cfg.save_video = False
+        cfg.compile = False
+        cfg.disable_wandb = True
+        _apply_multitask_metadata(cfg, metadata)
+        if spec_overrides:
+            for k, v in spec_overrides.items():
+                setattr(cfg, k, v)
+        cfg = parse_cfg(cfg)
+        cfg, env_for_dims = populate_env_dims(cfg)
+        _normalize_pretrained_cfg_numeric_fields(cfg, env_for_dims=env_for_dims)
+
+    model_state = None
+    if isinstance(state, dict):
+        if "model" in state:
+            model_state = state["model"]
+        elif "agent" in state and isinstance(state["agent"], dict):
+            model_state = state["agent"].get("model", state["agent"])
+        elif "state_dict" in state and isinstance(state["state_dict"], dict):
+            model_state = state["state_dict"]
+
+    if model_state is None:
+        model_state = state
+
+    obs_shape = getattr(cfg, "obs_shape", None)
+    if _is_placeholder(obs_shape):
+        raise ValueError("Pretrained config is missing obs_shape after normalization")
+    action_dim_val = getattr(cfg, "action_dim", None)
+    if _is_placeholder(action_dim_val):
+        raise ValueError("Pretrained config is missing action_dim after normalization")
+
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available; choose cpu device instead.")
 
     set_seed(cfg.seed)
     agent = TDMPC2(cfg)
-    agent.load(checkpoint_path)
+
+    expected_state = agent.model.state_dict()
+    if isinstance(model_state, dict):
+        sample_key = next(iter(expected_state.keys()))
+        if sample_key in model_state and hasattr(model_state[sample_key], "shape"):
+            if expected_state[sample_key].shape != model_state[sample_key].shape:
+                raise ValueError(
+                    f"Shape mismatch for parameter '{sample_key}': expected {expected_state[sample_key].shape}, "
+                    f"found {model_state[sample_key].shape} in checkpoint"
+                )
+
+    agent.load(model_state)
     agent.eval()
-    try:
-        env_for_dims.close()
-    except Exception:
-        pass
     return agent, cfg, metadata
 
 
