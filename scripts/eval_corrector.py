@@ -18,14 +18,13 @@ import torch
 import torch.nn as nn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "tdmpc2"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from common.seed import set_seed
-from envs import make_env
+from tdmpc2.common.seed import set_seed
+from tdmpc2.envs import make_env
 from tdmpc2 import TDMPC2
-from utils_ckpt import list_pretrained_checkpoints, load_pretrained_tdmpc2
+from tdmpc2.utils_ckpt import list_pretrained_checkpoints, load_pretrained_tdmpc2
 
 EVAL_VARIANTS = [
     {"name": "baseline", "exec_horizon": 1, "corrector_type": None},

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from omegaconf import OmegaConf
 
-from .tdmpc2 import TDMPC2
+from tdmpc2 import TDMPC2
 from .common.parser import parse_cfg, populate_env_dims
 from .envs import make_env
 
@@ -123,9 +123,15 @@ def list_pretrained_checkpoints(
     ``model_size_filter`` performs a case-insensitive exact match on the
     ``model_size`` field when provided.
     """
-
     checkpoints: Dict[str, Dict[str, str]] = {}
-    root = Path(checkpoint_dir)
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
+    abs_checkpoint_dir = project_root / checkpoint_dir
+    root = abs_checkpoint_dir
+
+    if not root.is_dir():
+        return {}
+
     for path in root.glob("*"):
         if not path.is_file() or path.suffix.lower() not in extensions:
             continue

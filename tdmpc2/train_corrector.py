@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import argparse
 import copy
 import csv
@@ -12,14 +16,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-try:
-    # When running as a package, e.g., `python -m tdmpc2.train_corrector`
-    from .corrector import build_corrector_from_cfg, corrector_loss
-    from .utils_ckpt import list_pretrained_checkpoints
-except ImportError:
-    # Fallback for running as a standalone script
-    from corrector import build_corrector_from_cfg, corrector_loss
-    from utils_ckpt import list_pretrained_checkpoints
+from tdmpc2.corrector import build_corrector_from_cfg, corrector_loss
+from tdmpc2.utils_ckpt import list_pretrained_checkpoints
 
 
 class CorrectorDataset(Dataset):
@@ -125,12 +123,13 @@ def discover_dataset_ids(data_dir: str) -> List[str]:
 def train_worker(args: argparse.Namespace) -> None:
     use_gpu = torch.cuda.is_available() and not args.device.startswith("cpu")
     device = torch.device(args.device if use_gpu else "cpu")
+    cpu_device = torch.device("cpu")
 
     data_path = Path(args.data)
     if data_path.is_dir():
-        tensors = maybe_concat(sorted(data_path.glob("*.pt")), device)
+        tensors = maybe_concat(sorted(data_path.glob("*.pt")), cpu_device)
     else:
-        tensors = load_tensor_dict(data_path, device)
+        tensors = load_tensor_dict(data_path, cpu_device)
 
     latent_dim = tensors["z_real"].shape[-1]
     act_dim = tensors["a_plan"].shape[-1]
@@ -155,7 +154,8 @@ def train_worker(args: argparse.Namespace) -> None:
     )
 
     corrector = build_corrector_from_cfg(cfg, latent_dim=latent_dim, act_dim=act_dim, device=device)
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1 and use_gpu:
+        # Disabled DataParallel to work around a server-side NCCL/multi-GPU communication issue.
+    if False and torch.cuda.is_available() and torch.cuda.device_count() > 1 and use_gpu:
         corrector = nn.DataParallel(corrector)
 
     optim = torch.optim.Adam(corrector.parameters(), lr=args.lr)
