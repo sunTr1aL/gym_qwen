@@ -4,9 +4,11 @@ from pathlib import Path
 from typing import Any
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 
 from tdmpc2.common import MODEL_SIZE, TASK_SET
+from tdmpc2.envs import make_env
 
 
 def _get_base_dir_for_cfg() -> Path:
@@ -41,9 +43,9 @@ def cfg_to_dataclass(cfg, frozen=False):
 
 
 def parse_cfg(cfg: OmegaConf) -> OmegaConf:
-	"""
-	Parses a Hydra config. Mostly for convenience.
-	"""
+        """
+        Parses a Hydra config. Mostly for convenience.
+        """
 
 	# Logic
 	for k in cfg.keys():
@@ -115,13 +117,77 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 		except Exception:
 			cfg.action_dim = action_dim
 
-	action_dims = cfg.get('action_dims', None)
-	if action_dims is not None:
-		if not isinstance(action_dims, (list, tuple)):
-			action_dims = [action_dims]
-		try:
-			cfg.action_dims = [int(d) for d in action_dims]
-		except Exception:
-			cfg.action_dims = action_dims
+        action_dims = cfg.get('action_dims', None)
+        if action_dims is not None:
+                if not isinstance(action_dims, (list, tuple)):
+                        action_dims = [action_dims]
+                try:
+                        cfg.action_dims = [int(d) for d in action_dims]
+                except Exception:
+                        cfg.action_dims = action_dims
 
-	return cfg_to_dataclass(cfg)
+        return cfg_to_dataclass(cfg)
+
+
+def populate_env_dims(cfg):
+        """
+        Ensure cfg has concrete obs_dim and action_dim based on an environment
+        created with make_env. This must work both when called from Hydra
+        training code and from offline scripts (like collect_corrector_data).
+
+        - If cfg.tasks is a list/tuple, we use the first task as cfg.task.
+        - If cfg.task is already set, we use it.
+        - If obs_dim/action_dim are strings or "???", we overwrite them using
+          the env's shapes.
+        Returns:
+            cfg, env
+        """
+        # Resolve a single task string
+        task = getattr(cfg, "task", None)
+        tasks = getattr(cfg, "tasks", None)
+        if task is None and tasks is not None:
+                # use the first task in the list/tuple
+                if isinstance(tasks, (list, tuple)) and len(tasks) > 0:
+                        task = tasks[0]
+                        cfg.task = task
+
+        if task is None:
+                raise ValueError("populate_env_dims: cfg.task is not set and cfg.tasks is empty")
+
+        # Build env similarly to training code.
+        # Use sensible defaults for optional fields if they are missing.
+        obs_type     = getattr(cfg, "obs_type", "states")
+        frame_stack  = int(getattr(cfg, "frame_stack", 1))
+        action_repeat = int(getattr(cfg, "action_repeat", 1))
+        seed         = int(getattr(cfg, "seed", 0))
+
+        env = make_env(
+                task=task,
+                obs_type=obs_type,
+                frame_stack=frame_stack,
+                action_repeat=action_repeat,
+                seed=seed,
+        )
+
+        # Infer obs_dim
+        if (not hasattr(cfg, "obs_dim") or
+            isinstance(cfg.obs_dim, str) or
+            getattr(cfg, "obs_dim", None) == "???"):
+                if hasattr(env, "obs_shape"):
+                        cfg.obs_dim = int(env.obs_shape[0])
+                else:
+                        # fallback to standard gym space
+                        cfg.obs_dim = int(env.observation_space.shape[0])
+
+        # Infer action_dim
+        if (not hasattr(cfg, "action_dim") or
+            isinstance(cfg.action_dim, str) or
+            getattr(cfg, "action_dim", None) == "???"):
+                if hasattr(env, "action_dim"):
+                        cfg.action_dim = int(env.action_dim)
+                else:
+                        cfg.action_dim = int(env.action_space.shape[0])
+
+        # You can add similar logic here for other dims (proprio_dim, etc.) if needed.
+
+        return cfg, env
