@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 from tdmpc2.common import math
 from tdmpc2.common.scale import RunningScale
 from tdmpc2.common.world_model import WorldModel
-from tdmpc2.common.layers import api_model_conversion
 from tensordict import TensorDict
 from .speculative_manager import SpeculativeManager
 from .corrector import build_corrector_from_cfg, corrector_loss
@@ -138,9 +137,19 @@ class TDMPC2(torch.nn.Module):
             state_dict = fp
         else:
             state_dict = torch.load(fp, map_location=torch.get_default_device(), weights_only=False)
-        state_dict = state_dict["model"] if "model" in state_dict else state_dict
-        state_dict = api_model_conversion(self.model.state_dict(), state_dict)
-        self.model.load_state_dict(state_dict)
+        state_dict = state_dict.get("model", state_dict)
+
+        # Avoid reshaping or flattening TensorDict-based parameters (e.g., Q ensembles).
+        # Official pretrained checkpoints are expected to align with the current codebase,
+        # so we load them directly and tolerate minor mismatches.
+        filtered_state_dict = {
+            k: v for k, v in state_dict.items() if "__batch_size" not in k and "__device" not in k
+        }
+        missing, unexpected = self.model.load_state_dict(filtered_state_dict, strict=False)
+        if missing:
+            print(f"[WARN] Missing keys while loading checkpoint: {missing}")
+        if unexpected:
+            print(f"[WARN] Unexpected keys while loading checkpoint: {unexpected}")
         return
 
     @torch.no_grad()
