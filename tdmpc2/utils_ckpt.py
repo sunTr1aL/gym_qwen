@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from omegaconf import OmegaConf
 
-from tdmpc2 import TDMPC2
+from .tdmpc2 import TDMPC2
 from .common.parser import parse_cfg, populate_env_dims
 from .envs import make_env
 

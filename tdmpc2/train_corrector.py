@@ -12,8 +12,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from corrector import build_corrector_from_cfg, corrector_loss
-from utils_ckpt import list_pretrained_checkpoints
+from .corrector import build_corrector_from_cfg, corrector_loss
+from .utils_ckpt import list_pretrained_checkpoints
 
 
 class CorrectorDataset(Dataset):
