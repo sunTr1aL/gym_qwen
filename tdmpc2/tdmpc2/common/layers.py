@@ -151,17 +151,38 @@ def conv(in_shape, num_channels, act=None):
 
 
 def enc(cfg, out={}):
-	"""
-	Returns a dictionary of encoders for each observation in the dict.
-	"""
-	for k in cfg.obs_shape.keys():
-		if k == 'state':
-			out[k] = mlp(cfg.obs_shape[k][0] + cfg.task_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], cfg.latent_dim, act=SimNorm(cfg))
-		elif k == 'rgb':
-			out[k] = conv(cfg.obs_shape[k], cfg.num_channels, act=SimNorm(cfg))
-		else:
-			raise NotImplementedError(f"Encoder for observation type {k} not implemented.")
-	return nn.ModuleDict(out)
+    """
+    Returns a dictionary of encoders for each observation in the dict.
+    """
+    obs_shape = cfg.obs_shape
+    obs_type = getattr(cfg, "obs_type", "states")
+    if isinstance(obs_shape, str):
+        obs_dim_val = getattr(cfg, "obs_dim", 0)
+        obs_dim = int(obs_dim_val) if str(obs_dim_val).isdigit() else 0
+        obs_shape = {obs_type: (obs_dim,)}
+        cfg.obs_shape = obs_shape
+    if not isinstance(obs_shape, dict):
+        obs_shape = {obs_type: tuple(obs_shape)}
+        cfg.obs_shape = obs_shape
+
+    for k in obs_shape.keys():
+        if k in ("state", "states", "proprio", "obs"):
+            out[k] = mlp(
+                obs_shape[k][0] + cfg.task_dim,
+                max(cfg.num_enc_layers - 1, 1) * [cfg.enc_dim],
+                cfg.latent_dim,
+                act=SimNorm(cfg),
+            )
+        elif k in ("rgb", "pixels"):
+            out[k] = conv(obs_shape[k], cfg.num_channels, act=SimNorm(cfg))
+        else:
+            out[k] = mlp(
+                obs_shape[k][0] + cfg.task_dim,
+                max(cfg.num_enc_layers - 1, 1) * [cfg.enc_dim],
+                cfg.latent_dim,
+                act=SimNorm(cfg),
+            )
+    return nn.ModuleDict(out)
 
 
 def api_model_conversion(target_state_dict, source_state_dict):
