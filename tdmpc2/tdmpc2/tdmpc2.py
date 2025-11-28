@@ -81,8 +81,6 @@ class TDMPC2(torch.nn.Module):
             buffer_capacity = getattr(self.cfg, "corrector_buffer_size", 0)
             if buffer_capacity:
                 self.corrector_buffer = CorrectorBuffer(buffer_capacity, device=self.device)
-        print('Episode length:', cfg.episode_length)
-        print('Discount factor:', self.discount)
         prev_mean_horizon = max(self.cfg.horizon, self.spec_exec_horizon, self.spec_plan_horizon)
         self.register_buffer(
             "_prev_mean",

@@ -9,8 +9,6 @@ import torch
 from omegaconf import OmegaConf
 
 from tdmpc2 import TDMPC2
-from tdmpc2.common.parser import parse_cfg, populate_env_dims
-from tdmpc2.common.seed import set_seed
 
 
 def list_pretrained_checkpoints(
@@ -50,89 +48,65 @@ def list_pretrained_checkpoints(
     return dict(sorted(checkpoints.items()))
 
 
-def _infer_task_from_metadata(metadata: Dict, fallback: Optional[str]) -> Optional[str]:
-    if fallback:
-        return fallback
-    if metadata.get("task"):
-        return metadata["task"]
-    tasks = metadata.get("tasks")
-    if isinstance(tasks, (list, tuple)) and tasks:
-        return tasks[0]
-    return None
-
-
-def _apply_multitask_metadata(cfg, metadata: Dict) -> None:
-    tasks = metadata.get("tasks")
-    task_dim = metadata.get("task_dim")
-    if tasks:
-        cfg.force_multitask = True
-        cfg.tasks_override = list(tasks)
-        if task_dim is not None:
-            cfg.task_dim = task_dim
-
-
 def load_pretrained_tdmpc2(
-    model_id: str,
     checkpoint_path: str,
     device: str = "cuda",
-    task: Optional[str] = None,
-    config_path: Optional[str] = None,
-    spec_overrides: Optional[Dict] = None,
-    corrector_ckpt: Optional[str] = None,
+    model_id: Optional[str] = None,
+    **_: Dict,
 ):
-    """Instantiate a TD-MPC2 agent from an arbitrary checkpoint path.
-
-    Args:
-        model_id: Filename stem for the checkpoint (used for logging/metadata).
-        checkpoint_path: Path to the pretrained weights.
-        device: Target device string.
-        task: Optional task override. Falls back to checkpoint metadata.
-        config_path: Optional path to ``config.yaml`` to load as the base config.
-        spec_overrides: Dict of spec-related overrides applied before parsing.
-        corrector_ckpt: Optional corrector checkpoint to attach for evaluation.
-
-    Returns:
-        (agent, cfg, metadata) tuple with the loaded, eval-mode TD-MPC2 agent.
-    """
+    """Instantiate a TD-MPC2 agent from a checkpoint using its saved config."""
 
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    metadata = state.get("metadata", {}) if isinstance(state, dict) else {}
+    if not isinstance(state, dict):
+        raise RuntimeError(f"Checkpoint {checkpoint_path} must be a mapping with a saved config.")
 
-    cfg_file = (
-        Path(config_path)
-        if config_path is not None
-        else Path(__file__).resolve().parent / "config.yaml"
-    )
-    cfg = OmegaConf.load(cfg_file)
-    cfg.device = device
-    cfg.task = _infer_task_from_metadata(metadata, task) or cfg.get("task")
-    cfg.model_id = model_id
+    metadata = state.get("metadata", {})
+    cfg = None
+    for key in ("cfg", "config", "hydra_cfg"):
+        if key in state:
+            cfg = state[key]
+            break
+    if cfg is None:
+        raise RuntimeError(f"Checkpoint {checkpoint_path} does not contain a 'cfg' entry.")
+
+    if isinstance(cfg, OmegaConf.DictConfig):
+        cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+
+    cfg.device = str(device)
+    cfg.disable_wandb = True
+    cfg.eval_mode = True
     cfg.checkpoint = str(checkpoint_path)
-    cfg.use_corrector = bool(corrector_ckpt)
-    cfg.corrector_ckpt = corrector_ckpt
-    cfg.corrector_type = metadata.get("corrector_type", cfg.get("corrector_type"))
-    cfg.speculate = False
-    cfg.spec_enabled = False
-    cfg.save_video = False
-    cfg.compile = False
-    _apply_multitask_metadata(cfg, metadata)
-    if spec_overrides:
-        for k, v in spec_overrides.items():
-            setattr(cfg, k, v)
-    cfg = parse_cfg(cfg)
-    cfg, env_for_dims = populate_env_dims(cfg)
-    if cfg.device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but not available; choose cpu device instead.")
+    if model_id is not None:
+        cfg.model_id = model_id
 
-    set_seed(cfg.seed)
     agent = TDMPC2(cfg)
-    agent.load(checkpoint_path)
+    agent.to(device)
     agent.eval()
-    try:
-        env_for_dims.close()
-    except Exception:
-        pass
-    return agent, cfg, metadata
+
+    if "model_state" in state:
+        model_state = state["model_state"]
+    elif "model" in state:
+        model_state = state["model"]
+    elif "agent" in state and isinstance(state["agent"], dict):
+        model_state = state["agent"].get("model", state["agent"])
+    elif "state_dict" in state and isinstance(state["state_dict"], dict):
+        model_state = state["state_dict"]
+    else:
+        raise RuntimeError(f"Checkpoint {checkpoint_path} has no recognizable model state.")
+
+    expected_state = agent.model.state_dict()
+    sample_key = None
+    if isinstance(model_state, dict):
+        for key in expected_state:
+            if key in model_state:
+                sample_key = key
+                break
+    if sample_key is not None:
+        print("New model weight shape:", expected_state[sample_key].shape)
+        print("Checkpoint weight shape:", model_state[sample_key].shape)
+
+    agent.load(model_state)
+    return agent, cfg
 
 
 __all__ = ["list_pretrained_checkpoints", "load_pretrained_tdmpc2"]

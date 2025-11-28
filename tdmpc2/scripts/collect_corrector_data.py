@@ -245,15 +245,7 @@ def _resolve_models(args: argparse.Namespace) -> Iterable[tuple[str, Dict[str, s
 def _load_agent_for_model(
     model_id: str, ckpt_path: str, args: argparse.Namespace, device: torch.device
 ):
-    spec_overrides = {"spec_enabled": False, "speculate": False}
-    agent, cfg, _ = load_pretrained_tdmpc2(
-        model_id,
-        checkpoint_path=ckpt_path,
-        device=str(device),
-        task=args.task,
-        config_path=args.config,
-        spec_overrides=spec_overrides,
-    )
+    agent, cfg = load_pretrained_tdmpc2(checkpoint_path=ckpt_path, device=str(device), model_id=model_id)
     return agent, cfg
 
 

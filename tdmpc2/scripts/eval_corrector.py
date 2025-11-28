@@ -65,25 +65,8 @@ def _build_agent(model_id: str, ckpt_path: str, variant: Dict[str, Any], args: a
     corr_type = variant["corrector_type"]
     exec_h = variant["exec_horizon"]
     corrector_ckpt = _corrector_ckpt_for(model_id, corr_type, args)
-    spec_overrides = {
-        "spec_enabled": exec_h > 1 or bool(corr_type),
-        "speculate": False,
-        "spec_plan_horizon": max(args.spec_plan_horizon, exec_h, 3),
-        "spec_exec_horizon": exec_h,
-        "spec_mismatch_threshold": args.spec_mismatch_threshold,
-        "use_corrector": bool(corr_type),
-        "corrector_ckpt": corrector_ckpt,
-    }
-    agent, cfg, metadata = load_pretrained_tdmpc2(
-        model_id,
-        checkpoint_path=ckpt_path,
-        device=args.device,
-        task=args.task,
-        config_path=args.config,
-        spec_overrides=spec_overrides,
-        corrector_ckpt=corrector_ckpt,
-    )
-    return agent, cfg, metadata, corrector_ckpt
+    agent, cfg = load_pretrained_tdmpc2(checkpoint_path=ckpt_path, device=args.device, model_id=model_id)
+    return agent, cfg, {}, corrector_ckpt
 
 
 def run_rollout(agent: TDMPC2, env, episodes: int, max_steps: int) -> Dict[str, List[float]]:
