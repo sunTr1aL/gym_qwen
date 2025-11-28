@@ -128,6 +128,13 @@ def collect_for_agent(
     max_samples = args.max_samples if args.max_samples and args.max_samples > 0 else None
     history = deque(maxlen=args.history_len)
     feat_dim = 3 * cfg.latent_dim + cfg.action_dim
+    if not hasattr(cfg, "obs") or str(cfg.obs).lower() not in {"state", "rgb"}:
+        cfg.obs = args.obs_type.lower()
+    else:
+        cfg.obs = str(cfg.obs).lower()
+    cfg.obs_type = str(getattr(cfg, "obs_type", cfg.obs)).lower()
+    if cfg.obs_type not in {"state", "rgb"}:
+        cfg.obs_type = cfg.obs
     env = make_env(cfg)
 
     task = None
@@ -255,6 +262,7 @@ def _load_agent_for_model(
         device=str(device),
         model_id=normalized_model_id,
         task=args.task,
+        obs_type=args.obs_type,
     )
     return agent, cfg
 
@@ -354,6 +362,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history_len", type=int, default=4, help="History length for temporal features")
     parser.add_argument("--plan_horizon", type=int, default=3, help="Teacher planning horizon")
     parser.add_argument("--teacher_interval", type=int, default=1, help="Collect teacher action every N steps")
+    parser.add_argument(
+        "--obs_type",
+        type=str,
+        default="state",
+        choices=["state", "rgb"],
+        help="Observation type for dmcontrol envs.",
+    )
     return parser.parse_args()
 
 

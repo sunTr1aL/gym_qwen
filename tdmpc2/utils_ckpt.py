@@ -150,6 +150,7 @@ def load_pretrained_tdmpc2(
     device: str = "cuda",
     model_id: Optional[str] = None,
     task: Optional[str] = None,
+    obs_type: Optional[str] = None,
     cfg_overrides: Optional[dict] = None,
     **_: Dict,
 ):
@@ -179,6 +180,10 @@ def load_pretrained_tdmpc2(
 
             if task is not None:
                 cfg.task = task
+
+            if obs_type is not None:
+                cfg.obs = obs_type.lower()
+                cfg.obs_type = cfg.obs
 
             if cfg_overrides:
                 for key, value in cfg_overrides.items():
@@ -255,6 +260,10 @@ def load_pretrained_tdmpc2(
 
     if task is not None:
         cfg.task = task
+
+    if obs_type is not None:
+        cfg.obs = obs_type.lower()
+        cfg.obs_type = cfg.obs
 
     if cfg_overrides:
         for key, value in cfg_overrides.items():

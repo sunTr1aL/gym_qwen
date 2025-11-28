@@ -95,12 +95,15 @@ def make_env(cfg):
 	"""
 	domain, task = cfg.task.replace('-', '_').split('_', 1)
 	domain = dict(cup='ball_in_cup', pointmass='point_mass').get(domain, domain)
-	if (domain, task) not in suite.ALL_TASKS:
-		raise ValueError('Unknown task:', task)
-	assert cfg.obs in {'state', 'rgb'}, 'This task only supports state and rgb observations.'
-	env = suite.load(domain,
-					 task,
-					 task_kwargs={'random': cfg.seed},
+        if (domain, task) not in suite.ALL_TASKS:
+                raise ValueError('Unknown task:', task)
+        if getattr(cfg, 'obs', None) not in {'state', 'rgb'}:
+                print(f"[WARN] Invalid cfg.obs={getattr(cfg, 'obs', None)!r}, defaulting to 'state'")
+                cfg.obs = 'state'
+        assert cfg.obs in {'state', 'rgb'}, 'This task only supports state and rgb observations.'
+        env = suite.load(domain,
+                                         task,
+                                         task_kwargs={'random': cfg.seed},
 					 visualize_reward=False)
 	env = action_scale.Wrapper(env, minimum=-1., maximum=1.)
 	env = DMControlWrapper(env, domain)

@@ -66,7 +66,11 @@ def _build_agent(model_id: str, ckpt_path: str, variant: Dict[str, Any], args: a
     exec_h = variant["exec_horizon"]
     corrector_ckpt = _corrector_ckpt_for(model_id, corr_type, args)
     agent, cfg = load_pretrained_tdmpc2(
-        checkpoint_path=ckpt_path, device=args.device, model_id=model_id, task=args.task
+        checkpoint_path=ckpt_path,
+        device=args.device,
+        model_id=model_id,
+        task=args.task,
+        obs_type=args.obs_type,
     )
     return agent, cfg, {}, corrector_ckpt
 
@@ -175,6 +179,13 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
                 agent.model = nn.DataParallel(agent.model)
                 if getattr(agent, "corrector", None) is not None:
                     agent.corrector = nn.DataParallel(agent.corrector)
+            if not hasattr(cfg, "obs") or str(cfg.obs).lower() not in {"state", "rgb"}:
+                cfg.obs = args.obs_type.lower()
+            else:
+                cfg.obs = str(cfg.obs).lower()
+            cfg.obs_type = str(getattr(cfg, "obs_type", cfg.obs)).lower()
+            if cfg.obs_type not in {"state", "rgb"}:
+                cfg.obs_type = cfg.obs
             env = make_env(cfg)
             metrics = run_rollout(agent, env, episodes=args.episodes, max_steps=args.max_steps)
             summary = summarize(metrics)
@@ -268,6 +279,13 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to save a quick aggregate horizon plot (uses aggregated CSV).",
     )
     parser.add_argument("--results_csv", type=str, default="results/corrector_eval/summary.csv")
+    parser.add_argument(
+        "--obs_type",
+        type=str,
+        default="state",
+        choices=["state", "rgb"],
+        help="Observation type for dmcontrol envs.",
+    )
     return parser.parse_args()
 
 
