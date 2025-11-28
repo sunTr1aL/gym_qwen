@@ -245,7 +245,10 @@ def _resolve_models(args: argparse.Namespace) -> Iterable[tuple[str, Dict[str, s
 def _load_agent_for_model(
     model_id: str, ckpt_path: str, args: argparse.Namespace, device: torch.device
 ):
-    agent, cfg = load_pretrained_tdmpc2(checkpoint_path=ckpt_path, device=str(device), model_id=model_id)
+    normalized_model_id = Path(model_id).stem
+    agent, cfg = load_pretrained_tdmpc2(
+        checkpoint_path=ckpt_path, device=str(device), model_id=normalized_model_id
+    )
     return agent, cfg
 
 
