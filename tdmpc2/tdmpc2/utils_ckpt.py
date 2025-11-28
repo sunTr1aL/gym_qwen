@@ -9,7 +9,7 @@ import torch
 from omegaconf import OmegaConf
 
 from tdmpc2 import TDMPC2
-from tdmpc2.common.parser import parse_cfg
+from tdmpc2.common.parser import parse_cfg, populate_env_dims
 from tdmpc2.common.seed import set_seed
 
 
@@ -120,6 +120,7 @@ def load_pretrained_tdmpc2(
         for k, v in spec_overrides.items():
             setattr(cfg, k, v)
     cfg = parse_cfg(cfg)
+    cfg, env_for_dims = populate_env_dims(cfg)
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available; choose cpu device instead.")
 
@@ -127,6 +128,10 @@ def load_pretrained_tdmpc2(
     agent = TDMPC2(cfg)
     agent.load(checkpoint_path)
     agent.eval()
+    try:
+        env_for_dims.close()
+    except Exception:
+        pass
     return agent, cfg, metadata
 
 

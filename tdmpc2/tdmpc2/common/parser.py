@@ -1,12 +1,31 @@
 import dataclasses
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import hydra
 from omegaconf import OmegaConf
 
 from tdmpc2.common import MODEL_SIZE, TASK_SET
+
+try:
+    from tdmpc2.envs import make_env
+except Exception:
+    make_env = None
+
+
+def _get_base_dir_for_cfg() -> Path:
+	"""Return a base directory for cfg.work_dir that works with or without Hydra.
+
+	When executed under a Hydra launcher, `hydra.utils.get_original_cwd()` points
+	to the original working directory. Offline scripts that call `parse_cfg`
+	directly (without initializing Hydra) should gracefully fall back to the
+	current working directory instead of raising a ValueError.
+	"""
+	try:
+		return Path(hydra.utils.get_original_cwd())
+	except Exception:
+		return Path.cwd()
 
 
 def _get_base_dir_for_cfg() -> Path:
@@ -95,33 +114,107 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 	if tasks_override:
 		cfg.tasks = list(tasks_override)
 		cfg.multitask = True
-	else:
-		cfg.tasks = TASK_SET.get(cfg.task, [cfg.task])
-	if cfg.multitask:
-		if cfg.task in TASK_SET.keys():
-			cfg.task_title = cfg.task.upper()
-		# Account for slight inconsistency in task_dim for the mt30 experiments
-		default_task_dim = 96 if cfg.task == 'mt80' or cfg.get('model_size', 5) in {1, 317} else 64
-		if not isinstance(cfg.get('task_dim', None), (int, float)):
-			cfg.task_dim = default_task_dim
-	else:
-		cfg.task_dim = 0
+        else:
+                cfg.tasks = TASK_SET.get(cfg.task, [cfg.task])
+        if cfg.multitask:
+                if cfg.task in TASK_SET.keys():
+                        cfg.task_title = cfg.task.upper()
+                # Account for slight inconsistency in task_dim for the mt30 experiments
+                default_task_dim = 96 if cfg.task == 'mt80' or cfg.get('model_size', 5) in {1, 317} else 64
+                if not isinstance(cfg.get('task_dim', None), (int, float)):
+                        cfg.task_dim = default_task_dim
+        else:
+                cfg.task_dim = 0
 
-	# Normalize action dimensions to integers for downstream tensor shapes.
-	action_dim = cfg.get('action_dim', None)
-	if action_dim is not None:
-		try:
-			cfg.action_dim = int(action_dim)
-		except Exception:
-			cfg.action_dim = action_dim
+        # Normalize action dimensions to integers for downstream tensor shapes.
+        action_dim = cfg.get('action_dim', None)
+        if action_dim is not None:
+                try:
+                        cfg.action_dim = int(action_dim)
+                except Exception:
+                        cfg.action_dim = action_dim
 
-	action_dims = cfg.get('action_dims', None)
-	if action_dims is not None:
-		if not isinstance(action_dims, (list, tuple)):
-			action_dims = [action_dims]
-		try:
-			cfg.action_dims = [int(d) for d in action_dims]
-		except Exception:
-			cfg.action_dims = action_dims
+        action_dims = cfg.get('action_dims', None)
+        if action_dims is not None:
+                if not isinstance(action_dims, (list, tuple)):
+                        action_dims = [action_dims]
+                try:
+                        cfg.action_dims = [int(d) for d in action_dims]
+                except Exception:
+                        cfg.action_dims = action_dims
 
-	return cfg_to_dataclass(cfg)
+        return cfg_to_dataclass(cfg)
+
+
+def _is_missing_dim(val: Any) -> bool:
+        """Return True if a config dimension is missing or non-numeric."""
+
+        if val is None:
+                return True
+        if isinstance(val, (int, float)):
+                return False
+        if isinstance(val, str):
+                if val.strip() == "???":
+                        return True
+                try:
+                        int(val)
+                        return False
+                except Exception:
+                        return True
+        return True
+
+
+def populate_env_dims(cfg) -> Tuple[Any, Optional[Any]]:
+        """Ensure cfg has concrete observation/action dimensions via environment introspection.
+
+        This helper is safe to call outside Hydra; it only builds an environment when
+        dimensions are missing or non-numeric (e.g., "???" from checkpoint configs).
+        It returns the possibly-updated ``cfg`` and the constructed environment (or
+        ``None`` if no environment creation was required).
+        """
+
+        missing_action_dim = _is_missing_dim(getattr(cfg, 'action_dim', None))
+        missing_obs_dim = _is_missing_dim(getattr(cfg, 'obs_dim', None))
+        if not (missing_action_dim or missing_obs_dim):
+                return cfg, None
+
+        if make_env is None:
+                raise RuntimeError('Environment utilities are unavailable to infer dimensions.')
+
+        # Prefer an explicit task, otherwise fall back to the first entry in tasks.
+        task = getattr(cfg, 'task', None)
+        tasks = getattr(cfg, 'tasks', None)
+        if (task is None or task == '???') and tasks:
+                cfg.task = tasks[0]
+
+        # Build env to infer dimensions; reuse cfg settings for obs/action preprocessing.
+        env = make_env(cfg)
+
+        if missing_action_dim:
+                if hasattr(env, 'action_space') and hasattr(env.action_space, 'shape'):
+                        cfg.action_dim = int(env.action_space.shape[0])
+                elif hasattr(env, 'action_dim'):
+                        cfg.action_dim = int(getattr(env, 'action_dim'))
+
+        if missing_obs_dim:
+                # Prefer explicit shapes from wrappers if available.
+                obs_shape = getattr(env, 'obs_shape', None)
+                if obs_shape is None:
+                        obs_shape = getattr(env, 'observation_space', None)
+                        if obs_shape is not None:
+                                obs_shape = getattr(obs_shape, 'shape', None)
+                if isinstance(obs_shape, dict) and obs_shape:
+                        first_shape = next(iter(obs_shape.values()))
+                        cfg.obs_dim = int(first_shape[0])
+                elif isinstance(obs_shape, (list, tuple)):
+                        cfg.obs_dim = int(obs_shape[0])
+                elif obs_shape is not None:
+                        cfg.obs_dim = int(obs_shape[0])
+
+        # Mirror action_dims if missing but available from a multitask wrapper.
+        if getattr(cfg, 'multitask', False) and not getattr(cfg, 'action_dims', None):
+                wrapper_dims = getattr(env, '_action_dims', None)
+                if wrapper_dims:
+                        cfg.action_dims = [int(d) for d in wrapper_dims]
+
+        return cfg, env

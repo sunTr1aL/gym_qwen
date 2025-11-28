@@ -17,30 +17,31 @@ class WorldModel(nn.Module):
 
 	def __init__(self, cfg):
 		super().__init__()
-		self.cfg = cfg
-		self.transformer_dynamic = bool(getattr(cfg, "transformer_dynamic", False))
-		if cfg.multitask:
-			self._task_emb = nn.Embedding(len(cfg.tasks), cfg.task_dim, max_norm=1)
+                self.cfg = cfg
+                self.transformer_dynamic = bool(getattr(cfg, "transformer_dynamic", False))
+                if cfg.multitask:
+                        self._task_emb = nn.Embedding(len(cfg.tasks), cfg.task_dim, max_norm=1)
 
-			# Normalize task and action dimensions for robust offline loading.
-			num_tasks = len(cfg.tasks) if isinstance(cfg.tasks, (list, tuple)) else 1
-			try:
-				action_dim = int(cfg.action_dim)
-			except Exception:
-				action_dim = int(getattr(cfg, "action_dim", 0))
+                        num_tasks = len(cfg.tasks) if isinstance(cfg.tasks, (list, tuple)) else 1
+                        try:
+                                action_dim = int(cfg.action_dim)
+                        except Exception as exc:
+                                raise AssertionError(
+                                        f"cfg.action_dim must be numeric for multitask models (got {cfg.action_dim!r})"
+                                ) from exc
 
-			raw_action_dims = getattr(cfg, "action_dims", None)
-			if raw_action_dims is None:
-				action_dims = [action_dim for _ in range(num_tasks)]
-			elif isinstance(raw_action_dims, (list, tuple)):
-				action_dims = [int(d) for d in raw_action_dims]
-			else:
-				# Single value broadcast across tasks
-				action_dims = [int(raw_action_dims) for _ in range(num_tasks)]
+                        raw_action_dims = getattr(cfg, "action_dims", None)
+                        if raw_action_dims is None:
+                                action_dims = [action_dim for _ in range(num_tasks)]
+                        elif isinstance(raw_action_dims, (list, tuple)):
+                                action_dims = [int(d) for d in raw_action_dims]
+                        else:
+                                # Single value broadcast across tasks
+                                action_dims = [int(raw_action_dims) for _ in range(num_tasks)]
 
-			self.register_buffer("_action_masks", torch.zeros(num_tasks, action_dim))
-			for i in range(num_tasks):
-				self._action_masks[i, :action_dims[i]] = 1.
+                        self.register_buffer("_action_masks", torch.zeros(num_tasks, action_dim))
+                        for i in range(num_tasks):
+                                self._action_masks[i, :action_dims[i]] = 1.
 		self._encoder = layers.enc(cfg)
 		if self.transformer_dynamic:
 			self._dynamics = TransformerDynamics(
