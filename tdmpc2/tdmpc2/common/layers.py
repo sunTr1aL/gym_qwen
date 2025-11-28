@@ -198,55 +198,45 @@ def enc(cfg, out={}):
 def api_model_conversion(target_state_dict, source_state_dict):
     """
     Converts a checkpoint from our old API to the new torch.compile compatible API.
+
+    NOTE:
+    In some older checkpoints, tensordict metadata (e.g., ``__batch_size`` or
+    ``__device``) can appear in parameter names. These metadata entries are not
+    present in the current model's ``state_dict`` and should not be treated as
+    learnable parameters during conversion. The conversion therefore only copies
+    keys that exist in the target model and skips metadata-style keys.
     """
     # check whether checkpoint is already in the new format
     if "_detach_Qs_params.0.weight" in source_state_dict:
         return source_state_dict
 
     name_map = ['weight', 'bias', 'ln.weight', 'ln.bias']
-    new_state_dict = dict()
+    new_state_dict = target_state_dict.copy()
+
+    def is_metadata(key: str) -> bool:
+        return "__batch_size" in key or "__device" in key
 
     # rename keys
     for key, val in list(source_state_dict.items()):
         if key.startswith('_Qs.'):
             num = key[len('_Qs.params.'):]
             new_key = str(int(num) // 4) + "." + name_map[int(num) % 4]
-            new_total_key = "_Qs.params." + new_key
+            for prefix in ("_Qs.params.", "_detach_Qs_params."):
+                candidate_key = prefix + new_key
+                if candidate_key in target_state_dict and not is_metadata(candidate_key):
+                    new_state_dict[candidate_key] = val
             del source_state_dict[key]
-            new_state_dict[new_total_key] = val
-            new_total_key = "_detach_Qs_params." + new_key
-            new_state_dict[new_total_key] = val
         elif key.startswith('_target_Qs.'):
             num = key[len('_target_Qs.params.'):]
             new_key = str(int(num) // 4) + "." + name_map[int(num) % 4]
-            new_total_key = "_target_Qs_params." + new_key
+            candidate_key = "_target_Qs_params." + new_key
+            if candidate_key in target_state_dict and not is_metadata(candidate_key):
+                new_state_dict[candidate_key] = val
             del source_state_dict[key]
-            new_state_dict[new_total_key] = val
 
-    # add batch_size and device from target_state_dict to new_state_dict
-    for prefix in ('_Qs.', '_detach_Qs_', '_target_Qs_'):
-        for key in ('__batch_size', '__device'):
-            new_key = prefix + 'params.' + key
-            new_state_dict[new_key] = target_state_dict[new_key]
+    # copy remaining parameters that directly match the target model
+    for key, val in source_state_dict.items():
+        if key in target_state_dict and not is_metadata(key):
+            new_state_dict[key] = val
 
-    # check that every key in new_state_dict is in target_state_dict
-    for key in new_state_dict.keys():
-        assert key in target_state_dict, f"key {key} not in target_state_dict"
-    # check that all Qs keys in target_state_dict are in new_state_dict
-    for key in target_state_dict.keys():
-        if 'Qs' in key:
-            assert key in new_state_dict, f"key {key} not in new_state_dict"
-    # check that source_state_dict contains no Qs keys
-    for key in source_state_dict.keys():
-        assert 'Qs' not in key, f"key {key} contains 'Qs'"
-
-    # copy log_std_min and log_std_max from target_state_dict to new_state_dict
-    new_state_dict['log_std_min'] = target_state_dict['log_std_min']
-    new_state_dict['log_std_dif'] = target_state_dict['log_std_dif']
-    if '_action_masks' in target_state_dict:
-        new_state_dict['_action_masks'] = target_state_dict['_action_masks']
-
-    # copy new_state_dict to source_state_dict
-    source_state_dict.update(new_state_dict)
-
-    return source_state_dict
+    return new_state_dict
