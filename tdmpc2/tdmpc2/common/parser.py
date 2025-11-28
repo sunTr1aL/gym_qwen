@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import re
 from pathlib import Path
@@ -133,39 +134,58 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 
 
 def populate_env_dims(cfg):
-    """Ensure cfg has concrete obs_dim and action_dim based on a created env.
+    """Ensure cfg has concrete obs_dim and action_dim based on an env.
 
-    - If cfg.tasks is a list/tuple, use the first task as cfg.task.
-    - If cfg.task is already set, use it.
-    - If obs_dim/action_dim are strings or "???", overwrite them using the env's shapes.
+    For multi-task configs (cfg.tasks is a list), we construct a temporary
+    single-task cfg and build an env from that to infer dims.
 
     Returns:
-        cfg, env
+        cfg, env_for_dims
     """
 
     task = getattr(cfg, "task", None)
     tasks = getattr(cfg, "tasks", None)
-    if task is None and tasks is not None:
-        if isinstance(tasks, (list, tuple)) and len(tasks) > 0:
-            task = tasks[0]
-            cfg.task = task
 
-    if task is None:
-        raise ValueError("populate_env_dims: cfg.task is not set and cfg.tasks is empty")
+    single_task = None
+    if tasks is not None:
+        flat_tasks = []
+        if isinstance(tasks, (list, tuple)):
+            for t in tasks:
+                if isinstance(t, (list, tuple)):
+                    flat_tasks.extend(t)
+                else:
+                    flat_tasks.append(t)
+        else:
+            flat_tasks = [tasks]
 
-    # Ensure expected fields exist for environment construction.
-    if not hasattr(cfg, "obs"):
-        cfg.obs = getattr(cfg, "obs_type", "states")
-    if not hasattr(cfg, "frame_stack"):
-        cfg.frame_stack = int(getattr(cfg, "frame_stack", 1))
-    if not hasattr(cfg, "action_repeat"):
-        cfg.action_repeat = int(getattr(cfg, "action_repeat", 1))
-    if not hasattr(cfg, "seed"):
-        cfg.seed = int(getattr(cfg, "seed", 0))
+        flat_tasks = [t for t in flat_tasks if isinstance(t, str)]
+        if not flat_tasks:
+            raise ValueError(f"populate_env_dims: could not infer a string task from cfg.tasks={tasks!r}")
+        single_task = flat_tasks[0]
+    elif isinstance(task, str):
+        single_task = task
+    else:
+        raise ValueError("populate_env_dims: neither cfg.task nor cfg.tasks provide a string task")
 
-    env = make_env(cfg)
+    cfg_env = copy.deepcopy(cfg)
+    cfg_env.task = single_task
 
-    if (not hasattr(cfg, "obs_dim") or isinstance(cfg.obs_dim, str) or getattr(cfg, "obs_dim", None) == "???"):
+    if hasattr(cfg_env, "tasks"):
+        cfg_env.tasks = None
+    if hasattr(cfg_env, "multitask"):
+        cfg_env.multitask = False
+    if hasattr(cfg_env, "multi_task"):
+        cfg_env.multi_task = False
+    if hasattr(cfg_env, "num_tasks"):
+        cfg_env.num_tasks = 1
+
+    env = make_env(cfg_env)
+
+    if (
+        not hasattr(cfg, "obs_dim")
+        or isinstance(cfg.obs_dim, str)
+        or getattr(cfg, "obs_dim", None) == "???"
+    ):
         if hasattr(env, "obs_shape"):
             cfg.obs_dim = int(env.obs_shape[0])
         else:
