@@ -282,6 +282,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to save a quick aggregate horizon plot (uses aggregated CSV).",
     )
+    parser.add_argument("--results_csv", type=str, default="results/corrector_eval/summary.csv")
     parser.add_argument(
         "--gpus", type=str, default="1", help="GPU selection: 'all', N, or comma-separated list",
     )
