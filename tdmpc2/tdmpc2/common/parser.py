@@ -9,6 +9,20 @@ from omegaconf import OmegaConf
 from tdmpc2.common import MODEL_SIZE, TASK_SET
 
 
+def _get_base_dir_for_cfg() -> Path:
+	"""Return a base directory for cfg.work_dir that works with or without Hydra.
+
+	When executed under a Hydra launcher, `hydra.utils.get_original_cwd()` points
+	to the original working directory. Offline scripts that call `parse_cfg`
+	directly (without initializing Hydra) should gracefully fall back to the
+	current working directory instead of raising a ValueError.
+	"""
+	try:
+		return Path(hydra.utils.get_original_cwd())
+	except Exception:
+		return Path.cwd()
+
+
 def cfg_to_dataclass(cfg, frozen=False):
 	"""
 	Converts an OmegaConf config to a dataclass object.
@@ -54,7 +68,8 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 			pass
 
 	# Convenience
-	cfg.work_dir = Path(hydra.utils.get_original_cwd()) / 'logs' / cfg.task / str(cfg.seed) / cfg.exp_name
+	base_dir = _get_base_dir_for_cfg()
+	cfg.work_dir = base_dir / 'logs' / cfg.task / str(cfg.seed) / cfg.exp_name
 	cfg.task_title = cfg.task.replace("-", " ").title()
 	cfg.bin_size = (cfg.vmax - cfg.vmin) / (cfg.num_bins-1) # Bin size for discrete regression
 	cfg.device = str(cfg.get('device', 'cuda'))
