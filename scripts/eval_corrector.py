@@ -310,7 +310,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_size", type=str, default=None, help="Filter checkpoints by size token (e.g., 5m)")
     parser.add_argument("--all_models", action="store_true", help="Evaluate every checkpoint discovered in checkpoint_dir")
     parser.add_argument("--all_model_sizes", action="store_true", help="Alias for --all_models")
-    parser.add_argument("--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory with pretrained models")
+    parser.add_argument(
+        "--checkpoint_dir",
+        "--model_dir",
+        dest="checkpoint_dir",
+        type=str,
+        default="tdmpc2_pretrained",
+        help="Directory with pretrained models",
+    )
     parser.add_argument("--corrector_dir", type=str, default="correctors", help="Directory containing trained correctors")
     parser.add_argument("--corrector_checkpoint", type=str, default=None, help="Override corrector checkpoint path")
     parser.add_argument("--spec_plan_horizon", type=int, default=3)

@@ -488,9 +488,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", "--env", dest="task", type=str, help="Task name / env id", required=False)
     parser.add_argument("--checkpoint", type=str, required=False, default=None, help="Manual TD-MPC2 checkpoint path")
     parser.add_argument(
-        "--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory containing pretrained checkpoints"
+        "--checkpoint_dir",
+        "--model_dir",
+        dest="checkpoint_dir",
+        type=str,
+        default="tdmpc2_pretrained",
+        help="Directory containing pretrained checkpoints",
     )
-    parser.add_argument("--model_dir", dest="checkpoint_dir", type=str, default=None, help="Alias for --checkpoint_dir")
     parser.add_argument("--model_id", type=str, default=None, help="Model id (checkpoint stem) to load")
     parser.add_argument("--model_size", type=str, default=None, help="Filter checkpoints by size token (e.g., 5m)")
     parser.add_argument("--all_models", action="store_true", help="Iterate over all checkpoints in checkpoint_dir")
