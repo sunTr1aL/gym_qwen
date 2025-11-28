@@ -197,6 +197,7 @@ def populate_env_dims(cfg):
     if not isinstance(obs_type, str) or obs_type == "???":
         obs_type = "states"
         cfg.obs_type = obs_type
+        cfg.obs = obs_type
 
     if (
         not hasattr(cfg, "obs_shape")
