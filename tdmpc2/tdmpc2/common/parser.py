@@ -9,6 +9,20 @@ from omegaconf import OmegaConf
 from tdmpc2.common import MODEL_SIZE, TASK_SET
 
 
+def _get_base_dir_for_cfg() -> Path:
+	"""Return a base directory for cfg.work_dir that works with or without Hydra.
+
+	When executed under a Hydra launcher, `hydra.utils.get_original_cwd()` points
+	to the original working directory. Offline scripts that call `parse_cfg`
+	directly (without initializing Hydra) should gracefully fall back to the
+	current working directory instead of raising a ValueError.
+	"""
+	try:
+		return Path(hydra.utils.get_original_cwd())
+	except Exception:
+		return Path.cwd()
+
+
 def cfg_to_dataclass(cfg, frozen=False):
 	"""
 	Converts an OmegaConf config to a dataclass object.
@@ -54,7 +68,8 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 			pass
 
 	# Convenience
-	cfg.work_dir = Path(hydra.utils.get_original_cwd()) / 'logs' / cfg.task / str(cfg.seed) / cfg.exp_name
+	base_dir = _get_base_dir_for_cfg()
+	cfg.work_dir = base_dir / 'logs' / cfg.task / str(cfg.seed) / cfg.exp_name
 	cfg.task_title = cfg.task.replace("-", " ").title()
 	cfg.bin_size = (cfg.vmax - cfg.vmin) / (cfg.num_bins-1) # Bin size for discrete regression
 	cfg.device = str(cfg.get('device', 'cuda'))
@@ -80,16 +95,33 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 	if tasks_override:
 		cfg.tasks = list(tasks_override)
 		cfg.multitask = True
-	else:
-		cfg.tasks = TASK_SET.get(cfg.task, [cfg.task])
-	if cfg.multitask:
-		if cfg.task in TASK_SET.keys():
-			cfg.task_title = cfg.task.upper()
-		# Account for slight inconsistency in task_dim for the mt30 experiments
-		default_task_dim = 96 if cfg.task == 'mt80' or cfg.get('model_size', 5) in {1, 317} else 64
-		if not isinstance(cfg.get('task_dim', None), (int, float)):
-			cfg.task_dim = default_task_dim
-	else:
-		cfg.task_dim = 0
+        else:
+                cfg.tasks = TASK_SET.get(cfg.task, [cfg.task])
+        if cfg.multitask:
+                if cfg.task in TASK_SET.keys():
+                        cfg.task_title = cfg.task.upper()
+                # Account for slight inconsistency in task_dim for the mt30 experiments
+                default_task_dim = 96 if cfg.task == 'mt80' or cfg.get('model_size', 5) in {1, 317} else 64
+                if not isinstance(cfg.get('task_dim', None), (int, float)):
+                        cfg.task_dim = default_task_dim
+        else:
+                cfg.task_dim = 0
 
-	return cfg_to_dataclass(cfg)
+        # Normalize action dimensions to integers for downstream tensor shapes.
+        action_dim = cfg.get('action_dim', None)
+        if action_dim is not None:
+                try:
+                        cfg.action_dim = int(action_dim)
+                except Exception:
+                        cfg.action_dim = action_dim
+
+        action_dims = cfg.get('action_dims', None)
+        if action_dims is not None:
+                if not isinstance(action_dims, (list, tuple)):
+                        action_dims = [action_dims]
+                try:
+                        cfg.action_dims = [int(d) for d in action_dims]
+                except Exception:
+                        cfg.action_dims = action_dims
+
+        return cfg_to_dataclass(cfg)
