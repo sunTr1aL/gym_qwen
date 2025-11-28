@@ -71,6 +71,76 @@ def _apply_multitask_metadata(cfg, metadata: Dict) -> None:
             cfg.task_dim = task_dim
 
 
+def _normalize_pretrained_cfg_numeric_fields(cfg, env_for_dims=None):
+    """Normalize numeric fields when loading pretrained checkpoints outside Hydra."""
+
+    if hasattr(cfg, "discount_denom"):
+        val = cfg.discount_denom
+        default_denom = 5
+        if isinstance(val, str):
+            if val.strip() == "???":
+                cfg.discount_denom = default_denom
+            else:
+                try:
+                    cfg.discount_denom = int(val)
+                except Exception:
+                    cfg.discount_denom = default_denom
+        elif isinstance(val, float):
+            cfg.discount_denom = int(val)
+
+    if hasattr(cfg, "episode_lengths"):
+        ep = cfg.episode_lengths
+        new_eps = None
+
+        if isinstance(ep, (list, tuple)):
+            tmp = []
+            for v in ep:
+                if isinstance(v, str):
+                    if v.strip() == "???":
+                        continue
+                    try:
+                        tmp.append(int(v))
+                    except Exception:
+                        pass
+                elif isinstance(v, (int, float)):
+                    tmp.append(int(v))
+            if tmp:
+                new_eps = tmp
+
+        elif isinstance(ep, str):
+            s = ep.strip()
+            if s == "???":
+                new_eps = None
+            else:
+                parts = [x.strip() for x in s.split(",")]
+                tmp = []
+                for p in parts:
+                    if p.isdigit():
+                        tmp.append(int(p))
+                if tmp:
+                    new_eps = tmp
+
+        elif isinstance(ep, (int, float)):
+            new_eps = [int(ep)]
+
+        if new_eps is None:
+            if env_for_dims is not None and hasattr(env_for_dims, "_max_episode_steps"):
+                default_len = int(env_for_dims._max_episode_steps)
+            elif env_for_dims is not None and hasattr(env_for_dims, "episode_length"):
+                default_len = int(env_for_dims.episode_length)
+            else:
+                default_len = 1000
+
+            tasks = getattr(cfg, "tasks", None)
+            if isinstance(tasks, (list, tuple)):
+                num_tasks = len(tasks)
+            else:
+                num_tasks = 1
+            new_eps = [default_len] * num_tasks
+
+        cfg.episode_lengths = new_eps
+
+
 def load_pretrained_tdmpc2(
     model_id: str,
     checkpoint_path: str,
@@ -121,6 +191,7 @@ def load_pretrained_tdmpc2(
             setattr(cfg, k, v)
     cfg = parse_cfg(cfg)
     cfg, env_for_dims = populate_env_dims(cfg)
+    _normalize_pretrained_cfg_numeric_fields(cfg, env_for_dims=env_for_dims)
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available; choose cpu device instead.")
 
