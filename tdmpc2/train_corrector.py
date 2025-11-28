@@ -266,7 +266,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train a speculative action corrector offline.")
     parser.add_argument("--data", type=str, required=False, help="Path to saved corrector buffer (.pt) or directory of buffers")
     parser.add_argument("--data_dir", type=str, default="data", help="Directory containing per-model datasets")
-    parser.add_argument("--checkpoint_dir", type=str, default="tdmpc2_pretrained", help="Directory containing pretrained TD-MPC2 checkpoints")
+    parser.add_argument(
+        "--checkpoint_dir",
+        "--model_dir",
+        dest="checkpoint_dir",
+        type=str,
+        default="tdmpc2_pretrained",
+        help="Directory containing pretrained TD-MPC2 checkpoints",
+    )
     parser.add_argument("--model_id", type=str, default=None, help="Model id (checkpoint stem) to train for")
     parser.add_argument("--model_size", type=str, default=None, help="Filter checkpoints by size token (e.g., 5m)")
     parser.add_argument("--all_models", action="store_true", help="Train correctors for every checkpoint discovered")

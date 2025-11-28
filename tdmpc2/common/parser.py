@@ -157,27 +157,42 @@ def populate_env_dims(cfg):
 
     task = getattr(cfg, "task", None)
     tasks = getattr(cfg, "tasks", None)
+    collection_mode = getattr(cfg, "collection_mode", "single")
+
+    def _flatten_tasks_list(tasks_val):
+        flat = []
+        if tasks_val is not None:
+            if isinstance(tasks_val, (list, tuple)):
+                for t in tasks_val:
+                    if isinstance(t, (list, tuple)):
+                        flat.extend(t)
+                    else:
+                        flat.append(t)
+            else:
+                flat = [tasks_val]
+        return [t for t in flat if isinstance(t, str)]
+
+    flat_tasks = _flatten_tasks_list(tasks)
 
     single_task = None
-    if tasks is not None:
-        flat_tasks = []
-        if isinstance(tasks, (list, tuple)):
-            for t in tasks:
-                if isinstance(t, (list, tuple)):
-                    flat_tasks.extend(t)
-                else:
-                    flat_tasks.append(t)
-        else:
-            flat_tasks = [tasks]
+    tasks_for_dims = flat_tasks if flat_tasks else []
 
-        flat_tasks = [t for t in flat_tasks if isinstance(t, str)]
-        if not flat_tasks:
-            raise ValueError(f"populate_env_dims: could not infer a string task from cfg.tasks={tasks!r}")
-        single_task = flat_tasks[0]
-    elif isinstance(task, str):
-        single_task = task
+    if collection_mode == "single":
+        if isinstance(task, str):
+            single_task = task
+        elif flat_tasks:
+            single_task = flat_tasks[0]
+        if single_task is None:
+            raise ValueError("populate_env_dims: neither cfg.task nor cfg.tasks provide a string task")
+        tasks_for_dims = [single_task]
     else:
-        raise ValueError("populate_env_dims: neither cfg.task nor cfg.tasks provide a string task")
+        if flat_tasks:
+            single_task = flat_tasks[0]
+        elif isinstance(task, str):
+            single_task = task
+            tasks_for_dims = [task]
+        else:
+            raise ValueError("populate_env_dims: neither cfg.task nor cfg.tasks provide a string task")
 
     cfg_env = copy.deepcopy(cfg)
     cfg_env.task = single_task
@@ -190,6 +205,8 @@ def populate_env_dims(cfg):
         cfg_env.multi_task = False
     if hasattr(cfg_env, "num_tasks"):
         cfg_env.num_tasks = 1
+    if hasattr(cfg_env, "collection_mode"):
+        cfg_env.collection_mode = "single"
 
     env = make_env(cfg_env)
 
@@ -259,22 +276,7 @@ def populate_env_dims(cfg):
         else:
             cfg.action_dim = int(env.action_space.shape[0])
 
-    tasks = getattr(cfg, "tasks", None)
-    num_tasks_for_dims = 1
-    flat_tasks = []
-    if tasks is not None:
-        if isinstance(tasks, (list, tuple)):
-            for t in tasks:
-                if isinstance(t, (list, tuple)):
-                    flat_tasks.extend(t)
-                else:
-                    flat_tasks.append(t)
-        else:
-            flat_tasks = [tasks]
-
-        flat_tasks = [t for t in flat_tasks if isinstance(t, str)]
-        if flat_tasks:
-            num_tasks_for_dims = len(flat_tasks)
+    num_tasks_for_dims = max(1, len(tasks_for_dims))
 
     cfg.action_dim = int(cfg.action_dim)
 
