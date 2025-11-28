@@ -35,13 +35,15 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 
 def make_multitask_env(cfg):
-	"""
-	Make a multi-task environment for TD-MPC2 experiments.
-	"""
-	print('Creating multi-task environment with tasks:', cfg.tasks)
-	envs = []
-	for task in cfg.tasks:
-		_cfg = deepcopy(cfg)
+        """
+        Make a multi-task environment for TD-MPC2 experiments.
+        """
+        if cfg.tasks is None:
+                raise ValueError("make_multitask_env: cfg.tasks is None; multi-task env requires tasks.")
+        print('Creating multi-task environment with tasks:', cfg.tasks)
+        envs = []
+        for task in cfg.tasks:
+                _cfg = deepcopy(cfg)
 		_cfg.task = task
 		_cfg.multitask = False
 		env = make_env(_cfg)
