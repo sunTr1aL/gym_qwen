@@ -223,6 +223,20 @@ def populate_env_dims(cfg):
             cfg.obs_dim = int(env.observation_space.shape[0])
 
     if (
+        not hasattr(cfg, "obs_shape")
+        or isinstance(cfg.obs_shape, str)
+        or getattr(cfg, "obs_shape", None) == "???"
+    ):
+        if hasattr(env, "obs_shape"):
+            obs_shape_env = env.obs_shape
+            if isinstance(obs_shape_env, dict):
+                cfg.obs_shape = obs_shape_env
+            else:
+                cfg.obs_shape = {"obs": tuple(obs_shape_env)}
+        else:
+            cfg.obs_shape = {"obs": tuple(env.observation_space.shape)}
+
+    if (
         not hasattr(cfg, "action_dim")
         or isinstance(cfg.action_dim, str)
         or getattr(cfg, "action_dim", None) == "???"
