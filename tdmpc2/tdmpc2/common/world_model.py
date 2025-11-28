@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from tdmpc2.common import layers, math, init
 from tdmpc2.tdmpc_transformer_dynamic import TransformerDynamics
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictParams
 
 
@@ -113,8 +113,29 @@ class WorldModel(nn.Module):
 
     def init(self):
         # Create params
-        self._detach_Qs_params = TensorDictParams(self._Qs.params.data, no_convert=True)
-        self._target_Qs_params = TensorDictParams(self._Qs.params.data.clone(), no_convert=True)
+        params = self._Qs.params
+
+        if isinstance(params, TensorDictParams):
+            params_data = params.data
+        elif hasattr(params, "data"):
+            params_data = params.data
+        elif isinstance(params, TensorDictBase):
+            params_data = params
+        elif isinstance(params, dict):
+            detached_params = {
+                key: value.detach() if hasattr(value, "detach") else value
+                for key, value in params.items()
+            }
+            params_data = TensorDict.from_dict(
+                detached_params, batch_size=[len(self._Qs)]
+            )
+        else:
+            raise TypeError(
+                f"Unsupported params type for Qs: {type(params)}"
+            )
+
+        self._detach_Qs_params = TensorDictParams(params_data, no_convert=True)
+        self._target_Qs_params = TensorDictParams(params_data.clone(), no_convert=True)
 
         # Create modules
         with self._detach_Qs_params.data.to("meta").to_module(self._Qs.module):
